@@ -1110,10 +1110,13 @@ function createPlanet(id, data) {
   const procMat = getMaterialForType(data.type, data);
   const mesh = new THREE.Mesh(geo, procMat);
   mesh.userData = { id, type: 'planet', name: data.name, procMat, imgMat: null };
-  group.add(mesh);
 
-  // Inclinación axial
-  mesh.rotation.z = deg2rad(data.tilt);
+  // Eje: group → axialGroup (inclinación) → mesh (rotación sidérea en Y)
+  // Así rotation.y del mesh no se mezcla con el tilt al mapear lat/lon
+  const axialGroup = new THREE.Group();
+  axialGroup.rotation.z = deg2rad(data.tilt || 0);
+  axialGroup.add(mesh);
+  group.add(axialGroup);
 
   // Nubes procedurales para Tierra
   if (data.type === 'earth') {
@@ -1146,7 +1149,7 @@ function createPlanet(id, data) {
   scene.add(orbitLine);
 
   bodies[id] = {
-    id, group, mesh, data, orbitLine, label,
+    id, group, mesh, axialGroup, data, orbitLine, label,
     moons: [], radius
   };
   allPickables.push(mesh);
@@ -1356,10 +1359,9 @@ eclipseShadow.visible = false;
 eclipseShadow.renderOrder = 2;
 scene.add(eclipseShadow);
 
-/** Tiempo sidéreo medio de Greenwich (radianes) a partir de JD */
+/** Tiempo sidéreo medio de Greenwich (radianes) */
 function gmstRadians(jd) {
   const T = (jd - 2451545.0) / 36525.0;
-  // Fórmula IAU (grados)
   let gmst =
     280.46061837 +
     360.98564736629 * (jd - 2451545.0) +
@@ -1369,26 +1371,67 @@ function gmstRadians(jd) {
 }
 
 /**
- * Vector unitario local en la esfera Three.js para lat/lon geográficas.
- * Ajustado a texturas equirectangulares tipo Solar System Scope / NASA
- * (u=0 → lon −180°, centro de la textura → lon 0° / Greenwich).
+ * Punto en la esfera unitaria (espacio del mesh, sin rotación)
+ * coincidente con SphereGeometry de Three.js + textura equirectangular
+ * donde u=0 → lon −180° y u=0.5 → lon 0° (Greenwich).
+ *
+ * Three.js SphereGeometry:
+ *   phi = ángulo polar desde +Y (0 = norte)
+ *   theta = alrededor de Y
+ *   x = −cos(theta)·sin(phi)
+ *   y =  cos(phi)
+ *   z =  sin(theta)·sin(phi)
+ *   u = theta / (2π)  →  theta = (lon+180)·π/180
  */
-function latLonToSphereLocal(latDeg, lonDeg) {
-  const lat = deg2rad(latDeg);
-  const lon = deg2rad(lonDeg);
-  // Convención Three.js SphereGeometry + mapa equirectangular
-  const x = Math.cos(lat) * Math.sin(lon);
-  const y = Math.sin(lat);
-  const z = Math.cos(lat) * Math.cos(lon);
+function latLonToMeshLocal(latDeg, lonDeg) {
+  const phi = deg2rad(90 - latDeg);       // 0 en el polo norte
+  const theta = deg2rad(lonDeg + 180);    // 0 en lon −180°
+  const sinPhi = Math.sin(phi);
+  const x = -Math.cos(theta) * sinPhi;
+  const y = Math.cos(phi);
+  const z = Math.sin(theta) * sinPhi;
   return new THREE.Vector3(x, y, z).normalize();
 }
 
-/** Ángulo de rotación Y de la Tierra para alinear Greenwich con el espacio inercial */
+/** Rotación Y (GMST) para orientación normal de la Tierra */
 function earthRotationY(jd) {
-  // GMST alinea el meridiano de Greenwich con el punto vernal / espacio
-  // Offset de textura: muchas mapas tienen 0° en el centro (lon=0 en u=0.5)
-  const TEXTURE_LON0_OFFSET = 0; // radianes; calibrable si el mapa difiere
-  return gmstRadians(jd) + TEXTURE_LON0_OFFSET;
+  // Con la convención de latLonToMeshLocal, el meridiano de Greenwich (lon=0)
+  // queda en theta=π → punto (+sin phi, …) sobre +X cuando rotation.y = 0.
+  // GMST gira ese meridiano respecto al cielo.
+  return -gmstRadians(jd);
+}
+
+/**
+ * Orienta la Tierra para que (lat,lon) mire hacia `toSun` (mundo),
+ * con elevación solar aproximada `elevDeg` (0 = horizonte, 90 = cenit).
+ * Solo ajusta rotation.y (yaw); la latitud se respeta vía el vector local.
+ */
+function orientEarthPointToSun(earthMesh, lat, lon, toSun, elevDeg) {
+  const local = latLonToMeshLocal(lat, lon);
+  // Proyección en XZ del punto geográfico y del Sol
+  const lx = local.x, lz = local.z;
+  const localLen = Math.hypot(lx, lz);
+  if (localLen < 1e-6) return; // polo: yaw indiferente
+
+  // Dirección deseada en mundo: hacia el Sol, inclinada por elevación
+  // elevación 90° → toSun puro; 0° → toSun proyectado al horizonte del punto
+  const elev = deg2rad(Math.max(0, Math.min(90, elevDeg != null ? elevDeg : 10)));
+  // Queremos que el vector local rotado apunte a toSun
+  // R_y(angle) * local = toSun (en norma XZ)
+  const sx = toSun.x, sz = toSun.z;
+  const sunLen = Math.hypot(sx, sz);
+  if (sunLen < 1e-6) return;
+
+  // Ángulos respecto a +X en el plano XZ
+  const aLocal = Math.atan2(lz, lx);
+  const aSun = Math.atan2(sz, sx);
+  // R_y de Three.js: rota el punto (x,z) → (x cos + z sin, …)
+  // angle tal que aLocal + angle = aSun
+  earthMesh.rotation.y = aSun - aLocal;
+
+  // Pequeño tip visual por elevación: no rotamos X (rompería la textura);
+  // la elevación se refleja en que el Sol no está en el ecuador del punto.
+  void elev;
 }
 
 function updatePositions(jd) {
@@ -1402,8 +1445,19 @@ function updatePositions(jd) {
 
     // Rotación propia
     if (id === 'earth') {
-      // Orientación geográfica real (longitud / sidéreo)
-      body.mesh.rotation.y = earthRotationY(jd);
+      if (eclipseActive && eclipseTarget) {
+        // Orientación forzada al punto del eclipse (se aplica en updateEclipseShadow)
+        const toSun = pos.clone().negate().normalize();
+        orientEarthPointToSun(
+          body.mesh,
+          eclipseTarget.lat,
+          eclipseTarget.lon,
+          toSun,
+          eclipseTarget.elevDeg
+        );
+      } else {
+        body.mesh.rotation.y = earthRotationY(jd);
+      }
     } else {
       const rotDays = jd - 2451545.0;
       const rotAngle = (rotDays / body.data.rotationPeriod) * Math.PI * 2;
@@ -1411,49 +1465,32 @@ function updatePositions(jd) {
     }
 
     if (body.mesh.userData.clouds) {
-      body.mesh.userData.clouds.rotation.y = body.mesh.rotation.y * 1.02;
+      body.mesh.userData.clouds.rotation.y = body.mesh.rotation.y;
     }
 
-    // Lunas (radio orbital visual)
+    // Lunas
     for (const moon of body.moons) {
       const orbitR = moon.visualOrbit || moon.data.a;
       if (eclipseActive && id === 'earth' && moon.id === 'moon') {
-        // Luna entre Sol (origen) y Tierra
-        const toSun = pos.clone().negate().normalize();
-        // Si hay objetivo (p.ej. Avilés), desplazar ligeramente el eje
-        // para que la umbra caiga en esa lat/lon con el Sol bajo
-        let axis = toSun.clone();
-        if (eclipseTarget) {
-          // Orientar la Tierra de modo que el punto objetivo mire al Sol
-          // (con elevación aproximada del Sol)
-          const elev = deg2rad(eclipseTarget.elevDeg != null ? eclipseTarget.elevDeg : 10);
-          const local = latLonToSphereLocal(eclipseTarget.lat, eclipseTarget.lon);
-          // Queremos: R * local ≈ dirección al Sol (con tilt por elevación)
-          // Ajustamos rotation.y ya con GMST; afinamos con un offset extra
-          const targetDir = local.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), body.mesh.rotation.y);
-          // Mezcla para elevación: no exactamente anti-radial puro
-          axis = toSun.clone();
-        }
-        moon.group.position.copy(axis.multiplyScalar(orbitR));
-        moon.mesh.rotation.y = Math.atan2(axis.x, axis.z) + Math.PI;
-      } else {
-        const moonDays = jd - 2451545.0;
-        const period = Math.abs(moon.data.period) || 1;
-        const moonAngle = (moonDays / period) * Math.PI * 2 * Math.sign(moon.data.period || 1);
-        moon.group.position.set(
-          Math.cos(moonAngle) * orbitR,
-          0,
-          Math.sin(moonAngle) * orbitR
-        );
-        moon.mesh.rotation.y = moonAngle + Math.PI;
+        // Posición de la Luna: se fija en updateEclipseShadow
+        continue;
       }
+      const moonDays = jd - 2451545.0;
+      const period = Math.abs(moon.data.period) || 1;
+      const moonAngle = (moonDays / period) * Math.PI * 2 * Math.sign(moon.data.period || 1);
+      moon.group.position.set(
+        Math.cos(moonAngle) * orbitR,
+        0,
+        Math.sin(moonAngle) * orbitR
+      );
+      moon.mesh.rotation.y = moonAngle + Math.PI;
     }
   }
 
-  updateEclipseShadow(jd);
+  updateEclipseShadow();
 }
 
-function updateEclipseShadow(jd) {
+function updateEclipseShadow() {
   const earth = bodies.earth;
   const moon = bodies.moon;
   if (!eclipseActive || !earth || !moon) {
@@ -1461,49 +1498,56 @@ function updateEclipseShadow(jd) {
     return;
   }
 
-  const epos = earth.group.position.clone();
+  earth.group.updateMatrixWorld(true);
+
+  const epos = new THREE.Vector3();
+  earth.group.getWorldPosition(epos);
   const toSun = epos.clone().negate().normalize();
   const er = earth.radius;
 
-  let hitLocal; // dirección local sobre la esfera
+  // Orientar (por si se llamó sin pasar por updatePositions)
   if (eclipseTarget) {
-    hitLocal = latLonToSphereLocal(eclipseTarget.lat, eclipseTarget.lon);
-    // Aplicar rotación actual de la Tierra
-    hitLocal.applyAxisAngle(new THREE.Vector3(0, 1, 0), earth.mesh.rotation.y);
-    // Ajuste fino: rotar la Tierra para que el punto mire hacia el Sol
-    // (máximo alineamiento Sol–punto–espacio)
-    const targetWorld = hitLocal.clone();
-    // Ángulo en el plano XZ entre proyección de target y toSun
-    const tXZ = new THREE.Vector3(targetWorld.x, 0, targetWorld.z).normalize();
-    const sXZ = new THREE.Vector3(toSun.x, 0, toSun.z).normalize();
-    if (tXZ.lengthSq() > 0.01 && sXZ.lengthSq() > 0.01) {
-      const cross = tXZ.x * sXZ.z - tXZ.z * sXZ.x;
-      const dot = tXZ.x * sXZ.x + tXZ.z * sXZ.z;
-      const delta = Math.atan2(cross, dot);
-      earth.mesh.rotation.y += delta;
-      if (earth.mesh.userData.clouds) {
-        earth.mesh.userData.clouds.rotation.y = earth.mesh.rotation.y * 1.02;
-      }
-      // Recalcular hit con nueva rotación
-      hitLocal = latLonToSphereLocal(eclipseTarget.lat, eclipseTarget.lon);
-      hitLocal.applyAxisAngle(new THREE.Vector3(0, 1, 0), earth.mesh.rotation.y);
+    orientEarthPointToSun(
+      earth.mesh,
+      eclipseTarget.lat,
+      eclipseTarget.lon,
+      toSun,
+      eclipseTarget.elevDeg
+    );
+    if (earth.mesh.userData.clouds) {
+      earth.mesh.userData.clouds.rotation.y = earth.mesh.rotation.y;
     }
-  } else {
-    hitLocal = toSun.clone();
   }
 
-  // Umbra más realista (~1% del diámetro terrestre visual → un poco mayor para verse)
-  const umbraR = er * 0.18;
+  // Punto geográfico en espacio local del mesh → mundo (incluye tilt + spin)
+  let localHit;
+  if (eclipseTarget) {
+    localHit = latLonToMeshLocal(eclipseTarget.lat, eclipseTarget.lon);
+  } else {
+    // Subsolar: dirección al Sol en espacio local del mesh
+    const inv = new THREE.Matrix4().copy(earth.mesh.matrixWorld).invert();
+    localHit = toSun.clone().transformDirection(inv).normalize();
+  }
+
+  const surfaceLocal = localHit.clone().multiplyScalar(er);
+  const surfaceWorld = surfaceLocal.clone();
+  earth.mesh.localToWorld(surfaceWorld);
+  const worldHit = surfaceWorld.clone().sub(epos).normalize();
+
+  // Disco de umbra
+  const umbraR = er * 0.16;
   eclipseShadow.scale.set(umbraR, umbraR, 1);
-  const surface = epos.clone().add(hitLocal.clone().multiplyScalar(er * 1.01));
-  eclipseShadow.position.copy(surface);
-  eclipseShadow.lookAt(epos.clone().add(hitLocal));
+  eclipseShadow.position.copy(epos).add(worldHit.clone().multiplyScalar(er * 1.012));
+  eclipseShadow.lookAt(surfaceWorld);
   eclipseShadow.visible = true;
 
-  // Reposicionar Luna en el eje Sol → punto de umbra
+  // Luna en el eje hacia el punto de umbra (espacio local del group de la Tierra)
   const orbitR = moon.visualOrbit || moon.data.a;
-  const axis = hitLocal.clone().normalize();
-  moon.group.position.copy(axis.multiplyScalar(orbitR));
+  // worldHit está en mundo; moon.group es hijo de earth.group
+  const moonWorld = epos.clone().add(worldHit.clone().multiplyScalar(orbitR));
+  earth.group.worldToLocal(moonWorld);
+  moon.group.position.copy(moonWorld);
+  moon.mesh.rotation.y = Math.atan2(moon.group.position.x, moon.group.position.z) + Math.PI;
 }
 
 // Cámara de seguimiento
@@ -1585,8 +1629,22 @@ document.getElementById('setDateBtn').addEventListener('click', () => {
   const d = readDateInputUTC();
   if (d) {
     simDate = d;
-    eclipseActive = false;
-    eclipseTarget = null;
+    // Mantener modo eclipse si seguimos cerca (±2 h) del evento seleccionado
+    if (eclipseActive && ephemerisSelect && ephemerisSelect.value !== '') {
+      const item = ephemerisList[parseInt(ephemerisSelect.value, 10)];
+      if (item) {
+        const eventDate = parseEphemerisDate(item);
+        if (eventDate && Math.abs(d.getTime() - eventDate.getTime()) < 2 * 3600 * 1000) {
+          // seguir en modo eclipse
+        } else {
+          eclipseActive = false;
+          eclipseTarget = null;
+        }
+      }
+    } else {
+      eclipseActive = false;
+      eclipseTarget = null;
+    }
     updatePositions(julianDate(simDate));
   }
 });

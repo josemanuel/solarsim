@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sistema Solar Interactivo — Three.js</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div id="ui">
+    <div class="panel">
+      <h1>Sistema Solar</h1>
+      <div class="control-group">
+        <label>Fecha y hora</label>
+        <input type="datetime-local" id="dateInput" step="1" />
+        <button id="setDateBtn">Ir a fecha</button>
+        <button id="nowBtn">Ahora</button>
+      </div>
+      <div class="control-group">
+        <label>Efemérides</label>
+        <select id="ephemerisSelect">
+          <option value="">— Seleccionar momento —</option>
+        </select>
+        <button id="ephemerisGoBtn" type="button">Ir a efeméride</button>
+        <div id="ephemerisInfo" class="ephemeris-info" hidden></div>
+      </div>
+      <div class="control-group">
+        <label>Velocidad temporal: <span id="speedValue">1x</span></label>
+        <input type="range" id="speedSlider" min="-3" max="8" step="0.1" value="0" />
+        <div class="btn-row">
+          <button id="pauseBtn">Pausa</button>
+          <button id="playBtn">Play</button>
+        </div>
+      </div>
+      <div class="control-group">
+        <label>Seguir cuerpo</label>
+        <select id="followSelect">
+          <option value="sun">Sol (centro)</option>
+        </select>
+        <button id="resetCamBtn">Vista general</button>
+      </div>
+      <div class="control-group">
+        <label>
+          <input type="checkbox" id="showOrbits" checked /> Mostrar órbitas
+        </label>
+        <label>
+          <input type="checkbox" id="showLabels" checked /> Mostrar etiquetas
+        </label>
+        <label>
+          <input type="checkbox" id="showMoons" checked /> Mostrar lunas
+        </label>
+        <label>
+          <input type="checkbox" id="useTextures" /> Texturas de imagen
+        </label>
+      </div>
+      <div class="btn-row" style="margin-top:8px">
+        <button id="aboutBtn" type="button">Acerca de</button>
+      </div>
+      <div class="info" id="infoPanel">
+        <p>Haz clic en un planeta o luna para seguirlo.</p>
+        <p>Rueda = zoom · Arrastrar = rotar · Click derecho = pan</p>
+      </div>
+    </div>
+    <div id="timeDisplay">--</div>
+  </div>
+
+  <!-- Modal Acerca de -->
+  <div id="aboutModal" class="modal" aria-hidden="true">
+    <div class="modal-backdrop" id="aboutBackdrop"></div>
+    <div class="modal-dialog" role="dialog" aria-labelledby="aboutTitle">
+      <button class="modal-close" id="aboutClose" aria-label="Cerrar">&times;</button>
+      <h2 id="aboutTitle">Acerca de esta aplicación</h2>
+
+      <section class="modal-section">
+        <h3>Características generales</h3>
+        <p>
+          Modelo 3D interactivo del Sistema Solar construido con <strong>Three.js</strong>
+          (HTML + CSS + JavaScript). Incluye posiciones keplerianas aproximadas, tiempo real
+          o acelerado, seguimiento de cámara, órbitas, lunas principales, paralaje estelar
+          y nebulosas procedurales.
+        </p>
+        <p><strong>Estructura de archivos:</strong></p>
+        <ul>
+          <li><code>index.html</code> — página principal y UI</li>
+          <li><code>css/style.css</code> — estilos del panel y del modal</li>
+          <li><code>js/main.js</code> — escena Three.js, órbitas, shaders y controles</li>
+          <li><code>textures/</code> — mapas de planetas, anillos, Sol y memoria del eclipse</li>
+          <li><code>efemerides.json</code> — momentos de interés (eclipses, etc.)</li>
+          <li><code>README.md</code> — documentación y despliegue en GitHub Pages</li>
+        </ul>
+        <p>
+          Puedes alternar entre <strong>texturas procedurales</strong> (shaders) y
+          <strong>texturas de imagen</strong> de la carpeta <code>textures/</code>
+          con el interruptor del panel.
+        </p>
+      </section>
+
+      <section class="modal-section">
+        <h3>Autor</h3>
+        <p><strong>José Manuel Fernández Carreira</strong></p>
+      </section>
+
+      <section class="modal-section">
+        <h3>Eclipse total de Sol — 12 de agosto de 2026</h3>
+        <p>
+          Este programa se creó como <strong>recordatorio del eclipse total de Sol
+          del día 12 de agosto de 2026</strong>, visible en la zona de
+          <strong>Avilés (Asturias)</strong> y otras localidades del norte de España
+          situadas en la franja de totalidad.
+        </p>
+        <figure class="eclipse-figure">
+          <img
+            src="textures/eclipse_aviles_2026.jpg"
+            alt="Eclipse total de Sol del 12 de agosto de 2026 en Avilés, Asturias"
+            loading="lazy"
+          />
+          <figcaption>Memoria del eclipse total de Sol — 12 ago 2026 — Avilés, Asturias</figcaption>
+        </figure>
+      </section>
+    </div>
+  </div>
+
+  <div id="canvas-container"></div>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

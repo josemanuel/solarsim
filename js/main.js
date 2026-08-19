@@ -1,6 +1,20 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+import {
+  NOISE_GLSL,
+  VERT_FULL,
+  ATMOSPHERE_VERT,
+  ATMOSPHERE_FRAG,
+  SOLAR_CORONA_VERT,
+  SOLAR_CORONA_FRAG,
+  ECLIPSE_SHADOW_VERT,
+  ECLIPSE_SHADOW_FRAG,
+  BAILY_CORONA_VERT,
+  BAILY_CORONA_FRAG,
+  CLOUD_TEX_VERT,
+  CLOUD_TEX_FRAG
+} from './shaders.js';
 
 // ─────────────────────────────────────────────────────────────
 // Escala de escena
@@ -525,106 +539,9 @@ createNebulae();
 // Shaders procedurales completos (Simplex + FBM + bump + lighting)
 // ─────────────────────────────────────────────────────────────
 
-const NOISE_GLSL = /* glsl */ `
-// ── Simplex 3D noise (Ashima / Ian McEwan) ──────────────────
-vec3 mod289(vec3 x){ return x - floor(x * (1.0/289.0)) * 289.0; }
-vec4 mod289(vec4 x){ return x - floor(x * (1.0/289.0)) * 289.0; }
-vec4 permute(vec4 x){ return mod289(((x*34.0)+1.0)*x); }
-vec4 taylorInvSqrt(vec4 r){ return 1.79284291400159 - 0.85373472095314 * r; }
+// NOISE_GLSL importado desde shaders.js
 
-float snoise(vec3 v){
-  const vec2 C = vec2(1.0/6.0, 1.0/3.0);
-  const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
-  vec3 i  = floor(v + dot(v, C.yyy));
-  vec3 x0 = v - i + dot(i, C.xxx);
-  vec3 g  = step(x0.yzx, x0.xyz);
-  vec3 l  = 1.0 - g;
-  vec3 i1 = min(g.xyz, l.zxy);
-  vec3 i2 = max(g.xyz, l.zxy);
-  vec3 x1 = x0 - i1 + C.xxx;
-  vec3 x2 = x0 - i2 + C.yyy;
-  vec3 x3 = x0 - D.yyy;
-  i = mod289(i);
-  vec4 p = permute(permute(permute(
-            i.z + vec4(0.0, i1.z, i2.z, 1.0))
-          + i.y + vec4(0.0, i1.y, i2.y, 1.0))
-          + i.x + vec4(0.0, i1.x, i2.x, 1.0));
-  float n_ = 0.142857142857;
-  vec3  ns = n_ * D.wyz - D.xzx;
-  vec4  j  = p - 49.0 * floor(p * ns.z * ns.z);
-  vec4  x_ = floor(j * ns.z);
-  vec4  y_ = floor(j - 7.0 * x_);
-  vec4  x  = x_ * ns.x + ns.yyyy;
-  vec4  y  = y_ * ns.x + ns.yyyy;
-  vec4  h  = 1.0 - abs(x) - abs(y);
-  vec4  b0 = vec4(x.xy, y.xy);
-  vec4  b1 = vec4(x.zw, y.zw);
-  vec4  s0 = floor(b0) * 2.0 + 1.0;
-  vec4  s1 = floor(b1) * 2.0 + 1.0;
-  vec4  sh = -step(h, vec4(0.0));
-  vec4  a0 = b0.xzyw + s0.xzyw * sh.xxyy;
-  vec4  a1 = b1.xzyw + s1.xzyw * sh.zzww;
-  vec3  p0 = vec3(a0.xy, h.x);
-  vec3  p1 = vec3(a0.zw, h.y);
-  vec3  p2 = vec3(a1.xy, h.z);
-  vec3  p3 = vec3(a1.zw, h.w);
-  vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2,p2), dot(p3,p3)));
-  p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
-  vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
-  m = m * m;
-  return 42.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
-}
-
-float fbm(vec3 p, int oct){
-  float v = 0.0, a = 0.5;
-  mat3 m = mat3(0.00, 0.80, 0.60, -0.80, 0.36, -0.48, -0.60, -0.48, 0.64);
-  for(int i = 0; i < 8; i++){
-    if(i >= oct) break;
-    v += a * snoise(p);
-    p = m * p * 2.0;
-    a *= 0.5;
-  }
-  return v;
-}
-
-// Normales por ruido (bump mapping procedural)
-vec3 bumpNormal(vec3 p, vec3 N, float scale, float strength){
-  float eps = 0.01;
-  float n0 = fbm(p * scale, 4);
-  float nx = fbm((p + vec3(eps,0.0,0.0)) * scale, 4);
-  float ny = fbm((p + vec3(0.0,eps,0.0)) * scale, 4);
-  float nz = fbm((p + vec3(0.0,0.0,eps)) * scale, 4);
-  vec3 grad = vec3(nx - n0, ny - n0, nz - n0) / eps;
-  return normalize(N - grad * strength);
-}
-
-// Iluminación Lambert + Blinn-Phong + ambient
-vec3 lightSurface(vec3 albedo, vec3 N, vec3 L, vec3 V, float shininess, float specStr){
-  float ndl = max(dot(N, L), 0.0);
-  vec3  H   = normalize(L + V);
-  float ndh = max(dot(N, H), 0.0);
-  float spec = pow(ndh, shininess) * specStr * ndl;
-  vec3 ambient = albedo * 0.08;
-  return ambient + albedo * ndl + vec3(spec);
-}
-`;
-
-const VERT_FULL = /* glsl */ `
-varying vec3 vPos;       // posición local (esfera unitaria ~)
-varying vec3 vNormal;    // normal en view space
-varying vec3 vWorldPos;  // posición mundo
-varying vec3 vViewDir;   // dirección hacia la cámara (view space)
-
-void main(){
-  vPos = position;
-  vec4 worldPos = modelMatrix * vec4(position, 1.0);
-  vWorldPos = worldPos.xyz;
-  vNormal = normalize(normalMatrix * normal);
-  vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
-  vViewDir = normalize(-mvPos.xyz);
-  gl_Position = projectionMatrix * mvPos;
-}
-`;
+// VERT_FULL importado desde shaders.js
 
 const shaderMaterials = [];
 
@@ -779,6 +696,7 @@ function createEarthMaterial() {
 }
 
 // ── Nubes Tierra ─────────────────────────────────────────────
+/** Nubes procedurales dinámicas: varias capas + viento */
 function createCloudMaterial() {
   return makeProcMaterial(/* glsl */ `
     varying vec3 vPos;
@@ -789,15 +707,78 @@ function createCloudMaterial() {
 
     void main(){
       vec3 p = normalize(vPos);
-      float n = fbm(p * 4.5 + vec3(uTime * 0.025, 0.0, uTime * 0.018), 5);
-      float alpha = smoothstep(0.12, 0.50, n) * 0.58;
 
+      // Viento: deriva distinta por capa
+      vec3 wind1 = vec3(uTime * 0.018, uTime * 0.004, uTime * 0.012);
+      vec3 wind2 = vec3(-uTime * 0.011, uTime * 0.006, uTime * 0.009);
+      vec3 wind3 = vec3(uTime * 0.007, -uTime * 0.003, -uTime * 0.014);
+
+      // Capas de nubes a distintas escalas
+      float c1 = fbm(p * 3.2 + wind1, 5);
+      float c2 = fbm(p * 6.5 + wind2, 4);
+      float c3 = fbm(p * 12.0 + wind3, 3);
+
+      // Combinación tipo cúmulos / cirros
+      float clouds = c1 * 0.55 + c2 * 0.30 + c3 * 0.15;
+      // Bandas ecuatoriales un poco más densas
+      float latBand = 1.0 - abs(p.y) * 0.35;
+      clouds *= latBand;
+
+      float alpha = smoothstep(0.28, 0.55, clouds);
+      alpha = pow(alpha, 1.15) * 0.72;
+
+      // Iluminación suave + borde dorado al terminador
       vec3 N = normalize(vNormal);
-      float ndl = max(dot(N, normalize(uLightDir)), 0.15);
-      vec3 col = vec3(1.0) * ndl;
+      vec3 L = normalize(uLightDir);
+      float ndl = max(dot(N, L), 0.0);
+      float day = smoothstep(-0.05, 0.4, ndl);
+      float term = exp(-pow(ndl * 4.0, 2.0));
+
+      vec3 col = mix(vec3(0.55, 0.58, 0.65), vec3(1.0, 1.0, 1.0), day);
+      col = mix(col, vec3(1.0, 0.75, 0.55), term * 0.5);
+
+      // Alpha menor en la noche
+      alpha *= mix(0.25, 1.0, day * 0.85 + 0.15);
+
       gl_FragColor = vec4(col, alpha);
     }
   `, {}, { transparent: true, depthWrite: false });
+}
+
+/** Nubes con textura bitmap + desplazamiento UV animado */
+function createDynamicCloudTextureMaterial(map) {
+  map.wrapS = map.wrapT = THREE.RepeatWrapping;
+  map.colorSpace = THREE.SRGBColorSpace;
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uMap: { value: map },
+      uTime: { value: 0 },
+      uLightDir: { value: new THREE.Vector3(1, 0, 0) },
+      uOpacity: { value: 0.55 }
+    },
+    vertexShader: CLOUD_TEX_VERT,
+    fragmentShader: CLOUD_TEX_FRAG,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.FrontSide
+  });
+}
+
+/** Atmósfera terrestre: halo Fresnel + scattering diurno/atardecer */
+function createAtmosphereMaterial() {
+  return new THREE.ShaderMaterial({
+    vertexShader: ATMOSPHERE_VERT,
+    fragmentShader: ATMOSPHERE_FRAG,
+    uniforms: {
+      uLightDir: { value: new THREE.Vector3(1, 0, 0) },
+      uCamPos: { value: new THREE.Vector3() },
+      uIntensity: { value: 1.15 }
+    },
+    transparent: true,
+    depthWrite: false,
+    side: THREE.BackSide,
+    blending: THREE.AdditiveBlending
+  });
 }
 
 // ── Marte ────────────────────────────────────────────────────
@@ -1065,16 +1046,60 @@ const sunMat = createSunMaterial();
 const sunMesh = new THREE.Mesh(sunGeo, sunMat);
 sunGroup.add(sunMesh);
 
-// Halo del Sol
+// Corona solar detallada (varias capas + rayos)
+function createSolarCoronaMaterial(layer) {
+  // layer: 0 = interna caliente, 1 = media, 2 = externa tenue
+  const intensity = [1.2, 0.7, 0.35][layer] || 0.5;
+  const rayCount = [11.0, 17.0, 7.0][layer] || 11.0;
+  return new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending,
+    uniforms: {
+      uTime: { value: 0 },
+      uIntensity: { value: intensity },
+      uRayCount: { value: rayCount },
+      uLayer: { value: layer }
+    },
+    vertexShader: SOLAR_CORONA_VERT,
+    fragmentShader: SOLAR_CORONA_FRAG
+  });
+}
+
+const sunCoronaMats = [];
+const sunCoronaLayers = [
+  { scale: 1.55, layer: 0 },
+  { scale: 2.2, layer: 1 },
+  { scale: 3.4, layer: 2 }
+];
+for (const cfg of sunCoronaLayers) {
+  const mat = createSolarCoronaMaterial(cfg.layer);
+  sunCoronaMats.push(mat);
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(0.09 * cfg.scale, 48, 48),
+    mat
+  );
+  mesh.renderOrder = -1;
+  sunGroup.add(mesh);
+}
+
+// Halo suave de fondo
 const sunGlow = new THREE.Mesh(
-  new THREE.SphereGeometry(0.15, 32, 32),
-  new THREE.MeshBasicMaterial({ color: 0xffaa33, transparent: true, opacity: 0.22 })
+  new THREE.SphereGeometry(0.42, 32, 32),
+  new THREE.MeshBasicMaterial({
+    color: 0xffcc66,
+    transparent: true,
+    opacity: 0.08,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending
+  })
 );
 sunGroup.add(sunGlow);
 
 const sunLabel = createLabel('Sol');
 sunGroup.add(sunLabel);
-sunLabel.position.y = 0.18;
+sunLabel.position.y = 0.22;
 
 // Guardar material procedural del Sol para el toggle
 sunMesh.userData.procMat = sunMat;
@@ -1118,16 +1143,44 @@ function createPlanet(id, data) {
   axialGroup.add(mesh);
   group.add(axialGroup);
 
-  // Nubes procedurales para Tierra
+  // Nubes dinámicas (2 capas) + atmósfera para Tierra
   if (data.type === 'earth') {
-    const clouds = new THREE.Mesh(
-      new THREE.SphereGeometry(radius * 1.015, 48, 48),
+    const cloudsLow = new THREE.Mesh(
+      new THREE.SphereGeometry(radius * 1.012, 64, 64),
       createCloudMaterial()
     );
-    mesh.add(clouds);
-    mesh.userData.clouds = clouds;
-    mesh.userData.cloudsProcMat = clouds.material;
+    const cloudsHigh = new THREE.Mesh(
+      new THREE.SphereGeometry(radius * 1.022, 48, 48),
+      createCloudMaterial()
+    );
+    // Capa alta más transparente / distinta fase
+    if (cloudsHigh.material.uniforms && cloudsHigh.material.uniforms.uTime) {
+      cloudsHigh.material = cloudsHigh.material.clone();
+      // makeProcMaterial may push to shaderMaterials — clone keeps own uniforms
+    }
+    cloudsLow.material.transparent = true;
+    cloudsHigh.material.transparent = true;
+    if (cloudsHigh.material.opacity !== undefined) cloudsHigh.material.opacity = 0.5;
+    mesh.add(cloudsLow);
+    mesh.add(cloudsHigh);
+    mesh.userData.clouds = cloudsLow;
+    mesh.userData.cloudsHigh = cloudsHigh;
+    mesh.userData.cloudsProcMat = cloudsLow.material;
+    mesh.userData.cloudsHighProcMat = cloudsHigh.material;
     mesh.userData.cloudsImgMat = null;
+    mesh.userData.cloudsHighImgMat = null;
+    // Velocidades angulares relativas (rad/s a 1x tiempo real, se escalan en animate)
+    mesh.userData.cloudSpinLow = 0.000012;
+    mesh.userData.cloudSpinHigh = -0.000008;
+
+    // Cáscara atmosférica (BackSide + aditivo)
+    const atmosphere = new THREE.Mesh(
+      new THREE.SphereGeometry(radius * 1.08, 64, 64),
+      createAtmosphereMaterial()
+    );
+    atmosphere.renderOrder = 1;
+    axialGroup.add(atmosphere);
+    mesh.userData.atmosphere = atmosphere;
   }
 
   // Anillos procedurales de Saturno
@@ -1250,13 +1303,17 @@ async function ensureImageMaterials() {
       });
     }
 
-    // Nubes Tierra
+    // Nubes Tierra dinámicas (bitmap + scroll UV)
     if (mesh.userData.clouds && data.clouds) {
       const ctex = await loadTexture(data.clouds);
       if (ctex) {
-        mesh.userData.cloudsImgMat = new THREE.MeshStandardMaterial({
-          map: ctex, transparent: true, opacity: 0.45, depthWrite: false
-        });
+        const ctex2 = ctex.clone();
+        ctex2.needsUpdate = true;
+        mesh.userData.cloudsImgMat = createDynamicCloudTextureMaterial(ctex);
+        mesh.userData.cloudsHighImgMat = createDynamicCloudTextureMaterial(ctex2);
+        if (mesh.userData.cloudsHighImgMat.uniforms) {
+          mesh.userData.cloudsHighImgMat.uniforms.uOpacity.value = 0.38;
+        }
       }
     }
 
@@ -1305,6 +1362,13 @@ function applyTextureMode(useImages) {
         mesh.userData.clouds.material = mesh.userData.cloudsProcMat;
       }
     }
+    if (mesh.userData.cloudsHigh) {
+      if (useImages && mesh.userData.cloudsHighImgMat) {
+        mesh.userData.cloudsHigh.material = mesh.userData.cloudsHighImgMat;
+      } else if (mesh.userData.cloudsHighProcMat) {
+        mesh.userData.cloudsHigh.material = mesh.userData.cloudsHighProcMat;
+      }
+    }
 
     if (mesh.userData.rings) {
       if (useImages && mesh.userData.ringsImgMat) {
@@ -1344,20 +1408,34 @@ let eclipseActive = false;
 // Objetivo de umbra (lat, lon) cuando hay eclipse localizado; null = eje Sol-Tierra
 let eclipseTarget = null; // { lat, lon, elevDeg }
 
-// Umbra proyectada sobre la Tierra
-const eclipseShadow = new THREE.Mesh(
-  new THREE.CircleGeometry(1, 64),
-  new THREE.MeshBasicMaterial({
-    color: 0x050505,
-    transparent: true,
-    opacity: 0.65,
-    depthWrite: false,
-    side: THREE.DoubleSide
-  })
+// Sombra de eclipse de alta calidad (shader: umbra + penumbra con degradado)
+const eclipseShadowGroup = new THREE.Group();
+eclipseShadowGroup.visible = false;
+
+// ECLIPSE_SHADOW_VERT desde shaders.js
+// ECLIPSE_SHADOW_FRAG desde shaders.js
+const eclipseShadowMat = new THREE.ShaderMaterial({
+  vertexShader: ECLIPSE_SHADOW_VERT,
+  fragmentShader: ECLIPSE_SHADOW_FRAG,
+  uniforms: {
+    uUmbra: { value: 0.38 },
+    uPenumbra: { value: 0.72 },
+    uIntensity: { value: 1.0 },
+    uUmbraColor: { value: new THREE.Color(0x030208) },
+    uPenumbraColor: { value: new THREE.Color(0x1a1528) }
+  },
+  transparent: true,
+  depthWrite: false,
+  side: THREE.DoubleSide,
+  blending: THREE.NormalBlending
+});
+
+const eclipseShadowMesh = new THREE.Mesh(
+  new THREE.CircleGeometry(1, 128),
+  eclipseShadowMat
 );
-eclipseShadow.visible = false;
-eclipseShadow.renderOrder = 2;
-scene.add(eclipseShadow);
+eclipseShadowGroup.add(eclipseShadowMesh);
+let eclipseShadowParent = null;
 
 /** Tiempo sidéreo medio de Greenwich (radianes) */
 function gmstRadians(jd) {
@@ -1402,36 +1480,33 @@ function earthRotationY(jd) {
 }
 
 /**
- * Orienta la Tierra para que (lat,lon) mire hacia `toSun` (mundo),
- * con elevación solar aproximada `elevDeg` (0 = horizonte, 90 = cenit).
- * Solo ajusta rotation.y (yaw); la latitud se respeta vía el vector local.
+ * Orienta la Tierra (solo yaw del mesh) para que el punto (lat,lon)
+ * quede lo más alineado posible con la dirección al Sol.
+ * Con elevación baja (atardecer) el punto queda cerca del terminador.
  */
 function orientEarthPointToSun(earthMesh, lat, lon, toSun, elevDeg) {
   const local = latLonToMeshLocal(lat, lon);
-  // Proyección en XZ del punto geográfico y del Sol
   const lx = local.x, lz = local.z;
-  const localLen = Math.hypot(lx, lz);
-  if (localLen < 1e-6) return; // polo: yaw indiferente
+  if (Math.hypot(lx, lz) < 1e-6) return;
 
-  // Dirección deseada en mundo: hacia el Sol, inclinada por elevación
-  // elevación 90° → toSun puro; 0° → toSun proyectado al horizonte del punto
-  const elev = deg2rad(Math.max(0, Math.min(90, elevDeg != null ? elevDeg : 10)));
-  // Queremos que el vector local rotado apunte a toSun
-  // R_y(angle) * local = toSun (en norma XZ)
   const sx = toSun.x, sz = toSun.z;
-  const sunLen = Math.hypot(sx, sz);
-  if (sunLen < 1e-6) return;
+  if (Math.hypot(sx, sz) < 1e-6) return;
 
-  // Ángulos respecto a +X en el plano XZ
+  // R_y(angle) en Three.js: (x',z') = (x cosθ + z sinθ, −x sinθ + z cosθ)
+  // Queremos que el azimut del punto coincida con el del Sol
   const aLocal = Math.atan2(lz, lx);
   const aSun = Math.atan2(sz, sx);
-  // R_y de Three.js: rota el punto (x,z) → (x cos + z sin, …)
-  // angle tal que aLocal + angle = aSun
   earthMesh.rotation.y = aSun - aLocal;
 
-  // Pequeño tip visual por elevación: no rotamos X (rompería la textura);
-  // la elevación se refleja en que el Sol no está en el ecuador del punto.
-  void elev;
+  // Elevación: desplazar el yaw para acercar el punto al terminador
+  // cuando el Sol está bajo (eclipse al atardecer en Asturias ≈ 10°)
+  const elev = elevDeg != null ? elevDeg : 10;
+  if (elev < 80) {
+    // Offset en longitud ≈ (90° − elev) hacia el oeste del mediodía
+    // para simular Sol bajo en el horizonte oeste
+    const termOffset = deg2rad(90 - elev) * 0.85;
+    earthMesh.rotation.y -= termOffset;
+  }
 }
 
 function updatePositions(jd) {
@@ -1464,9 +1539,8 @@ function updatePositions(jd) {
       body.mesh.rotation.y = rotAngle;
     }
 
-    if (body.mesh.userData.clouds) {
-      body.mesh.userData.clouds.rotation.y = body.mesh.rotation.y;
-    }
+    // Nubes: rotación independiente (no bloquear al spin de la Tierra)
+
 
     // Lunas
     for (const moon of body.moons) {
@@ -1490,14 +1564,25 @@ function updatePositions(jd) {
   updateEclipseShadow();
 }
 
+function ensureEclipseShadowOnEarth(earthMesh) {
+  if (eclipseShadowParent === earthMesh) return;
+  if (eclipseShadowParent) {
+    eclipseShadowParent.remove(eclipseShadowGroup);
+  }
+  earthMesh.add(eclipseShadowGroup);
+  eclipseShadowParent = earthMesh;
+}
+
 function updateEclipseShadow() {
   const earth = bodies.earth;
   const moon = bodies.moon;
   if (!eclipseActive || !earth || !moon) {
-    eclipseShadow.visible = false;
+    eclipseShadowGroup.visible = false;
+    if (bailyGroup) bailyGroup.visible = false;
     return;
   }
 
+  ensureEclipseShadowOnEarth(earth.mesh);
   earth.group.updateMatrixWorld(true);
 
   const epos = new THREE.Vector3();
@@ -1505,7 +1590,7 @@ function updateEclipseShadow() {
   const toSun = epos.clone().negate().normalize();
   const er = earth.radius;
 
-  // Orientar (por si se llamó sin pasar por updatePositions)
+  // 1) Orientar la Tierra para el punto del eclipse
   if (eclipseTarget) {
     orientEarthPointToSun(
       earth.mesh,
@@ -1514,40 +1599,181 @@ function updateEclipseShadow() {
       toSun,
       eclipseTarget.elevDeg
     );
-    if (earth.mesh.userData.clouds) {
-      earth.mesh.userData.clouds.rotation.y = earth.mesh.rotation.y;
-    }
+    // Nubes mantienen su propio ángulo (animado en el loop)
   }
 
-  // Punto geográfico en espacio local del mesh → mundo (incluye tilt + spin)
+  // 2) Anclar umbra/penumbra al punto geográfico EN ESPACIO LOCAL del mesh
+  //    Así la sombra queda pegada a Asturias en la textura, sin errores de proyección mundo
   let localHit;
   if (eclipseTarget) {
     localHit = latLonToMeshLocal(eclipseTarget.lat, eclipseTarget.lon);
   } else {
-    // Subsolar: dirección al Sol en espacio local del mesh
     const inv = new THREE.Matrix4().copy(earth.mesh.matrixWorld).invert();
     localHit = toSun.clone().transformDirection(inv).normalize();
   }
 
-  const surfaceLocal = localHit.clone().multiplyScalar(er);
+  // Posición sobre la superficie (ligeramente por encima para evitar z-fighting)
+  const surfaceLocal = localHit.clone().multiplyScalar(er * 1.01);
+  eclipseShadowGroup.position.copy(surfaceLocal);
+
+  // Orientar el disco tangente a la superficie (normal = localHit)
+  eclipseShadowGroup.quaternion.setFromUnitVectors(
+    new THREE.Vector3(0, 0, 1),
+    localHit.clone().normalize()
+  );
+
+  // Radio del disco = penumbra visual (educativa; real ~1% del diámetro)
+  const discR = er * 0.28;
+  eclipseShadowMesh.scale.set(discR, discR, 1);
+  // Proporción umbra / penumbra dentro del shader (0–1 del radio del disco)
+  eclipseShadowMat.uniforms.uUmbra.value = 0.36;
+  eclipseShadowMat.uniforms.uPenumbra.value = 0.78;
+  eclipseShadowMat.uniforms.uIntensity.value = 1.0;
+
+  eclipseShadowGroup.visible = true;
+
+  // 3) Luna en el eje Sol → punto de umbra (espacio del group de la Tierra)
   const surfaceWorld = surfaceLocal.clone();
   earth.mesh.localToWorld(surfaceWorld);
   const worldHit = surfaceWorld.clone().sub(epos).normalize();
-
-  // Disco de umbra
-  const umbraR = er * 0.16;
-  eclipseShadow.scale.set(umbraR, umbraR, 1);
-  eclipseShadow.position.copy(epos).add(worldHit.clone().multiplyScalar(er * 1.012));
-  eclipseShadow.lookAt(surfaceWorld);
-  eclipseShadow.visible = true;
-
-  // Luna en el eje hacia el punto de umbra (espacio local del group de la Tierra)
   const orbitR = moon.visualOrbit || moon.data.a;
-  // worldHit está en mundo; moon.group es hijo de earth.group
   const moonWorld = epos.clone().add(worldHit.clone().multiplyScalar(orbitR));
-  earth.group.worldToLocal(moonWorld);
-  moon.group.position.copy(moonWorld);
+  const moonLocal = moonWorld.clone();
+  earth.group.worldToLocal(moonLocal);
+  moon.group.position.copy(moonLocal);
   moon.mesh.rotation.y = Math.atan2(moon.group.position.x, moon.group.position.z) + Math.PI;
+
+  // 4) Efecto Baily (perlas + anillo de diamante + corona)
+  updateBailyBeads(moon, worldHit);
+}
+
+// ── Efecto Baily (perlas de Baily + anillo de diamante + corona) ──
+let bailyGroup = null;
+let bailyBeads = [];
+let bailyDiamond = null;
+let bailyCorona = null;
+let bailyParent = null;
+
+function ensureBailyOnMoon(moonMesh, moonRadius) {
+  if (bailyParent === moonMesh && bailyGroup) return;
+  if (bailyGroup && bailyParent) bailyParent.remove(bailyGroup);
+
+  bailyGroup = new THREE.Group();
+  bailyBeads = [];
+
+  // Corona de totalidad (vista desde la umbra / limbo lunar)
+  const coronaMat = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending,
+    uniforms: {
+      uIntensity: { value: 1.35 },
+      uTime: { value: 0 }
+    },
+    vertexShader: BAILY_CORONA_VERT,
+    fragmentShader: BAILY_CORONA_FRAG
+  });
+  bailyCorona = new THREE.Mesh(new THREE.CircleGeometry(1, 96), coronaMat);
+  bailyCorona.scale.setScalar(moonRadius * 4.2);
+  bailyGroup.add(bailyCorona);
+
+  // Perlas de Baily: puntos irregulares en el limbo
+  const beadGeo = new THREE.SphereGeometry(1, 12, 12);
+  const beadCount = 18;
+  for (let i = 0; i < beadCount; i++) {
+    const mat = new THREE.MeshBasicMaterial({
+      color: new THREE.Color().setHSL(0.12 + Math.random() * 0.06, 0.9, 0.85),
+      transparent: true,
+      opacity: 0.9,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending
+    });
+    const bead = new THREE.Mesh(beadGeo, mat);
+    // Ángulos irregulares (valles lunares)
+    const ang = (i / beadCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.25;
+    const jitter = 0.92 + Math.random() * 0.12;
+    bead.userData.angle = ang;
+    bead.userData.jitter = jitter;
+    bead.userData.phase = Math.random() * Math.PI * 2;
+    bead.userData.baseScale = moonRadius * (0.04 + Math.random() * 0.07);
+    bailyGroup.add(bead);
+    bailyBeads.push(bead);
+  }
+
+  // Anillo de diamante: destello único más brillante
+  const diamondMat = new THREE.MeshBasicMaterial({
+    color: 0xffffee,
+    transparent: true,
+    opacity: 1,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending
+  });
+  bailyDiamond = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 16), diamondMat);
+  bailyDiamond.userData.angle = 0.35; // posición en el limbo
+  bailyGroup.add(bailyDiamond);
+
+  moonMesh.add(bailyGroup);
+  bailyParent = moonMesh;
+}
+
+function updateBailyBeads(moon, worldHitSunDir) {
+  if (!eclipseActive || !moon) {
+    if (bailyGroup) bailyGroup.visible = false;
+    return;
+  }
+  const mr = moon.radius || 0.01;
+  ensureBailyOnMoon(moon.mesh, mr);
+  bailyGroup.visible = true;
+
+  // Orientar el grupo de Baily hacia el Sol (eje del eclipse)
+  // worldHitSunDir apunta desde Tierra hacia el limbo / Sol
+  const localSun = worldHitSunDir.clone();
+  // Convertir dirección mundo a espacio del mesh de la Luna
+  moon.mesh.updateMatrixWorld(true);
+  const inv = new THREE.Matrix4().copy(moon.mesh.matrixWorld).invert();
+  localSun.transformDirection(inv).normalize();
+
+  // Corona mirando al Sol
+  bailyCorona.position.copy(localSun.clone().multiplyScalar(mr * 0.15));
+  bailyCorona.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), localSun);
+  if (bailyCorona.material.uniforms) {
+    bailyCorona.material.uniforms.uTime.value = shaderTime;
+    bailyCorona.material.uniforms.uIntensity.value = 1.45;
+  }
+
+  // Perlas en el limbo (círculo perpendicular a la dirección al Sol)
+  // Construir base ortonormal
+  let up = new THREE.Vector3(0, 1, 0);
+  if (Math.abs(localSun.dot(up)) > 0.9) up = new THREE.Vector3(1, 0, 0);
+  const right = new THREE.Vector3().crossVectors(up, localSun).normalize();
+  const ortho = new THREE.Vector3().crossVectors(localSun, right).normalize();
+
+  const t = shaderTime;
+  for (const bead of bailyBeads) {
+    const ang = bead.userData.angle + t * 0.02;
+    const r = mr * bead.userData.jitter;
+    const pos = right.clone().multiplyScalar(Math.cos(ang) * r)
+      .add(ortho.clone().multiplyScalar(Math.sin(ang) * r))
+      .add(localSun.clone().multiplyScalar(mr * 0.05));
+    bead.position.copy(pos);
+    // Parpadeo irregular (valles que se abren/cierran)
+    const flicker = 0.5 + 0.5 * Math.sin(t * 3.5 + bead.userData.phase) *
+      Math.sin(t * 1.7 + bead.userData.phase * 1.3);
+    const s = bead.userData.baseScale * (0.55 + flicker * 0.9);
+    bead.scale.setScalar(s);
+    bead.material.opacity = 0.35 + flicker * 0.65;
+  }
+
+  // Anillo de diamante: perla dominante
+  const dAng = bailyDiamond.userData.angle + Math.sin(t * 0.4) * 0.08;
+  const dPos = right.clone().multiplyScalar(Math.cos(dAng) * mr * 1.02)
+    .add(ortho.clone().multiplyScalar(Math.sin(dAng) * mr * 1.02))
+    .add(localSun.clone().multiplyScalar(mr * 0.08));
+  bailyDiamond.position.copy(dPos);
+  const dFlicker = 0.7 + 0.3 * Math.sin(t * 5.0);
+  bailyDiamond.scale.setScalar(mr * (0.14 + dFlicker * 0.08));
+  bailyDiamond.material.opacity = 0.75 + dFlicker * 0.25;
 }
 
 // Cámara de seguimiento
@@ -1906,25 +2132,55 @@ function animate(now) {
   for (const m of nebulaMaterials) {
     if (m.uniforms && m.uniforms.uTime) m.uniforms.uTime.value = shaderTime;
   }
+  for (const m of sunCoronaMats) {
+    if (m.uniforms && m.uniforms.uTime) m.uniforms.uTime.value = shaderTime;
+  }
+
+  // Nubes dinámicas: spin relativo + uTime en materiales de textura
+  const earthBody = bodies.earth;
+  if (earthBody && earthBody.mesh) {
+    const em = earthBody.mesh;
+    // Factor de velocidad: más rápido si el tiempo simulado está acelerado
+    const cloudRate = Math.min(Math.max(timeScale, 0.2), 500);
+    if (em.userData.clouds) {
+      em.userData.clouds.rotation.y += (em.userData.cloudSpinLow || 0.000012) * cloudRate * dt * 60;
+      if (em.userData.clouds.material && em.userData.clouds.material.uniforms && em.userData.clouds.material.uniforms.uTime) {
+        em.userData.clouds.material.uniforms.uTime.value = shaderTime;
+      }
+    }
+    if (em.userData.cloudsHigh) {
+      em.userData.cloudsHigh.rotation.y += (em.userData.cloudSpinHigh || -0.000008) * cloudRate * dt * 60;
+      if (em.userData.cloudsHigh.material && em.userData.cloudsHigh.material.uniforms && em.userData.cloudsHigh.material.uniforms.uTime) {
+        em.userData.cloudsHigh.material.uniforms.uTime.value = shaderTime * 1.15;
+      }
+    }
+  }
 
   const jd = julianDate(simDate);
   updatePositions(jd);
 
-  // Luz desde el Sol (origen) hacia cada cuerpo
+  // Luz desde el Sol (origen) hacia cada cuerpo + atmósfera
   for (const body of Object.values(bodies)) {
-    if (!body.mesh || !body.mesh.material || !body.mesh.material.uniforms) continue;
+    if (!body.mesh) continue;
     const wp = new THREE.Vector3();
     body.mesh.getWorldPosition(wp);
-    // Dirección de la luz = desde el Sol hacia el cuerpo → -wp
-    if (wp.lengthSq() > 1e-12) {
-      const L = wp.clone().normalize().negate();
+    if (wp.lengthSq() <= 1e-12) continue;
+    const L = wp.clone().normalize().negate();
+
+    if (body.mesh.material && body.mesh.material.uniforms && body.mesh.material.uniforms.uLightDir) {
       body.mesh.material.uniforms.uLightDir.value.copy(L);
-      // Nubes / anillos hijos
-      body.mesh.traverse(child => {
-        if (child.material && child.material.uniforms && child.material.uniforms.uLightDir) {
-          child.material.uniforms.uLightDir.value.copy(L);
-        }
-      });
+    }
+    // Nubes / anillos hijos del mesh
+    body.mesh.traverse(child => {
+      if (child.material && child.material.uniforms && child.material.uniforms.uLightDir) {
+        child.material.uniforms.uLightDir.value.copy(L);
+      }
+    });
+    // Atmósfera (hija del axialGroup)
+    const atmo = body.mesh.userData.atmosphere;
+    if (atmo && atmo.material && atmo.material.uniforms) {
+      if (atmo.material.uniforms.uLightDir) atmo.material.uniforms.uLightDir.value.copy(L);
+      if (atmo.material.uniforms.uCamPos) atmo.material.uniforms.uCamPos.value.copy(camera.position);
     }
   }
 

@@ -2,22 +2,34 @@
   {
     "tipo": "Eclipse total",
     "fecha": "20260812",
-    "hora": "20:30",
+    "hora": "20:28",
+    "horaUTC": "18:28",
+    "tz": "CEST",
     "localizacion": "Avilés",
-    "link": "https://eclipses.ign.es/"
+    "link": "https://eclipses.ign.es/",
+    "eclipse": true,
+    "nota": "Totalidad ~20:28 hora peninsular (CEST = UTC+2). Sol bajo al atardecer."
   },
   {
     "tipo": "Eclipse total",
     "fecha": "20270802",
     "hora": "10:47",
+    "horaUTC": "08:47",
+    "tz": "CEST",
     "localizacion": "Cádiz",
-    "link": "https://eclipses.ign.es/"
+    "link": "https://eclipses.ign.es/",
+    "eclipse": true,
+    "nota": "Hora peninsular aproximada (CEST = UTC+2)."
   },
   {
     "tipo": "Eclipse anular",
     "fecha": "20280126",
     "hora": "17:55",
+    "horaUTC": "16:55",
+    "tz": "CET",
     "localizacion": "Sevilla",
-    "link": "https://eclipses.ign.es/"
+    "link": "https://eclipses.ign.es/",
+    "eclipse": true,
+    "nota": "Hora peninsular aproximada (CET = UTC+1 en enero)."
   }
 ]

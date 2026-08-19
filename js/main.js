@@ -1333,19 +1333,21 @@ async function initDefaultTextures() {
 // ─────────────────────────────────────────────────────────────
 // Estado de simulación
 let simDate = new Date();
-let timeScale = 1; // días de simulación por segundo real
+let timeScale = 1; // 1 = tiempo real (1 s simulado / 1 s real)
 let paused = false;
 let followId = 'sun';
 let lastTime = performance.now();
-let eclipseActive = false; // alinear Luna y mostrar umbra
+let eclipseActive = false;
+// Objetivo de umbra (lat, lon) cuando hay eclipse localizado; null = eje Sol-Tierra
+let eclipseTarget = null; // { lat, lon, elevDeg }
 
-// Umbra proyectada sobre la Tierra (disco semitransparente)
+// Umbra proyectada sobre la Tierra
 const eclipseShadow = new THREE.Mesh(
-  new THREE.CircleGeometry(1, 48),
+  new THREE.CircleGeometry(1, 64),
   new THREE.MeshBasicMaterial({
-    color: 0x000000,
+    color: 0x050505,
     transparent: true,
-    opacity: 0.55,
+    opacity: 0.65,
     depthWrite: false,
     side: THREE.DoubleSide
   })
@@ -1354,35 +1356,90 @@ eclipseShadow.visible = false;
 eclipseShadow.renderOrder = 2;
 scene.add(eclipseShadow);
 
+/** Tiempo sidéreo medio de Greenwich (radianes) a partir de JD */
+function gmstRadians(jd) {
+  const T = (jd - 2451545.0) / 36525.0;
+  // Fórmula IAU (grados)
+  let gmst =
+    280.46061837 +
+    360.98564736629 * (jd - 2451545.0) +
+    0.000387933 * T * T -
+    (T * T * T) / 38710000.0;
+  return deg2rad(mod360(gmst));
+}
+
+/**
+ * Vector unitario local en la esfera Three.js para lat/lon geográficas.
+ * Ajustado a texturas equirectangulares tipo Solar System Scope / NASA
+ * (u=0 → lon −180°, centro de la textura → lon 0° / Greenwich).
+ */
+function latLonToSphereLocal(latDeg, lonDeg) {
+  const lat = deg2rad(latDeg);
+  const lon = deg2rad(lonDeg);
+  // Convención Three.js SphereGeometry + mapa equirectangular
+  const x = Math.cos(lat) * Math.sin(lon);
+  const y = Math.sin(lat);
+  const z = Math.cos(lat) * Math.cos(lon);
+  return new THREE.Vector3(x, y, z).normalize();
+}
+
+/** Ángulo de rotación Y de la Tierra para alinear Greenwich con el espacio inercial */
+function earthRotationY(jd) {
+  // GMST alinea el meridiano de Greenwich con el punto vernal / espacio
+  // Offset de textura: muchas mapas tienen 0° en el centro (lon=0 en u=0.5)
+  const TEXTURE_LON0_OFFSET = 0; // radianes; calibrable si el mapa difiere
+  return gmstRadians(jd) + TEXTURE_LON0_OFFSET;
+}
+
 function updatePositions(jd) {
   const T = centuriesSinceJ2000(jd);
 
   for (const [id, body] of Object.entries(bodies)) {
-    if (body.data.parent) continue; // lunas se actualizan después
+    if (body.data.parent) continue;
 
     const pos = keplerPosition(body.data, T);
     body.group.position.copy(pos);
 
     // Rotación propia
-    const rotDays = (jd - 2451545.0); // días desde J2000
-    const rotAngle = (rotDays / body.data.rotationPeriod) * Math.PI * 2;
-    body.mesh.rotation.y = rotAngle;
+    if (id === 'earth') {
+      // Orientación geográfica real (longitud / sidéreo)
+      body.mesh.rotation.y = earthRotationY(jd);
+    } else {
+      const rotDays = jd - 2451545.0;
+      const rotAngle = (rotDays / body.data.rotationPeriod) * Math.PI * 2;
+      body.mesh.rotation.y = rotAngle;
+    }
 
     if (body.mesh.userData.clouds) {
-      body.mesh.userData.clouds.rotation.y = rotAngle * 1.15;
+      body.mesh.userData.clouds.rotation.y = body.mesh.rotation.y * 1.02;
     }
 
     // Lunas (radio orbital visual)
     for (const moon of body.moons) {
       const orbitR = moon.visualOrbit || moon.data.a;
       if (eclipseActive && id === 'earth' && moon.id === 'moon') {
-        // Luna entre el Sol (origen) y la Tierra → alineación de eclipse
+        // Luna entre Sol (origen) y Tierra
         const toSun = pos.clone().negate().normalize();
-        moon.group.position.copy(toSun.multiplyScalar(orbitR));
-        moon.mesh.rotation.y = Math.atan2(toSun.x, toSun.z) + Math.PI;
+        // Si hay objetivo (p.ej. Avilés), desplazar ligeramente el eje
+        // para que la umbra caiga en esa lat/lon con el Sol bajo
+        let axis = toSun.clone();
+        if (eclipseTarget) {
+          // Orientar la Tierra de modo que el punto objetivo mire al Sol
+          // (con elevación aproximada del Sol)
+          const elev = deg2rad(eclipseTarget.elevDeg != null ? eclipseTarget.elevDeg : 10);
+          const local = latLonToSphereLocal(eclipseTarget.lat, eclipseTarget.lon);
+          // Queremos: R * local ≈ dirección al Sol (con tilt por elevación)
+          // Ajustamos rotation.y ya con GMST; afinamos con un offset extra
+          const targetDir = local.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), body.mesh.rotation.y);
+          // Mezcla para elevación: no exactamente anti-radial puro
+          axis = toSun.clone();
+        }
+        moon.group.position.copy(axis.multiplyScalar(orbitR));
+        moon.mesh.rotation.y = Math.atan2(axis.x, axis.z) + Math.PI;
       } else {
         const moonDays = jd - 2451545.0;
-        const moonAngle = (moonDays / Math.abs(moon.data.period)) * Math.PI * 2 * Math.sign(moon.data.period || 1);
+        const period = Math.abs(moon.data.period) || 1;
+        const moonAngle = (moonDays / period) * Math.PI * 2 * Math.sign(moon.data.period || 1);
         moon.group.position.set(
           Math.cos(moonAngle) * orbitR,
           0,
@@ -1393,25 +1450,60 @@ function updatePositions(jd) {
     }
   }
 
-  // Umbra sobre la Tierra en modo eclipse
-  updateEclipseShadow();
+  updateEclipseShadow(jd);
 }
 
-function updateEclipseShadow() {
+function updateEclipseShadow(jd) {
   const earth = bodies.earth;
   const moon = bodies.moon;
   if (!eclipseActive || !earth || !moon) {
     eclipseShadow.visible = false;
     return;
   }
+
   const epos = earth.group.position.clone();
   const toSun = epos.clone().negate().normalize();
-  // Disco de sombra sobre la cara iluminada (lado Sol), centrado hacia el Sol
-  const r = earth.radius * 0.55; // umbra visual
-  eclipseShadow.scale.set(r, r, 1);
-  eclipseShadow.position.copy(epos).add(toSun.clone().multiplyScalar(earth.radius * 1.02));
-  eclipseShadow.lookAt(epos.clone().add(toSun));
+  const er = earth.radius;
+
+  let hitLocal; // dirección local sobre la esfera
+  if (eclipseTarget) {
+    hitLocal = latLonToSphereLocal(eclipseTarget.lat, eclipseTarget.lon);
+    // Aplicar rotación actual de la Tierra
+    hitLocal.applyAxisAngle(new THREE.Vector3(0, 1, 0), earth.mesh.rotation.y);
+    // Ajuste fino: rotar la Tierra para que el punto mire hacia el Sol
+    // (máximo alineamiento Sol–punto–espacio)
+    const targetWorld = hitLocal.clone();
+    // Ángulo en el plano XZ entre proyección de target y toSun
+    const tXZ = new THREE.Vector3(targetWorld.x, 0, targetWorld.z).normalize();
+    const sXZ = new THREE.Vector3(toSun.x, 0, toSun.z).normalize();
+    if (tXZ.lengthSq() > 0.01 && sXZ.lengthSq() > 0.01) {
+      const cross = tXZ.x * sXZ.z - tXZ.z * sXZ.x;
+      const dot = tXZ.x * sXZ.x + tXZ.z * sXZ.z;
+      const delta = Math.atan2(cross, dot);
+      earth.mesh.rotation.y += delta;
+      if (earth.mesh.userData.clouds) {
+        earth.mesh.userData.clouds.rotation.y = earth.mesh.rotation.y * 1.02;
+      }
+      // Recalcular hit con nueva rotación
+      hitLocal = latLonToSphereLocal(eclipseTarget.lat, eclipseTarget.lon);
+      hitLocal.applyAxisAngle(new THREE.Vector3(0, 1, 0), earth.mesh.rotation.y);
+    }
+  } else {
+    hitLocal = toSun.clone();
+  }
+
+  // Umbra más realista (~1% del diámetro terrestre visual → un poco mayor para verse)
+  const umbraR = er * 0.18;
+  eclipseShadow.scale.set(umbraR, umbraR, 1);
+  const surface = epos.clone().add(hitLocal.clone().multiplyScalar(er * 1.01));
+  eclipseShadow.position.copy(surface);
+  eclipseShadow.lookAt(epos.clone().add(hitLocal));
   eclipseShadow.visible = true;
+
+  // Reposicionar Luna en el eje Sol → punto de umbra
+  const orbitR = moon.visualOrbit || moon.data.a;
+  const axis = hitLocal.clone().normalize();
+  moon.group.position.copy(axis.multiplyScalar(orbitR));
 }
 
 // Cámara de seguimiento
@@ -1451,18 +1543,36 @@ function formatDate(d) {
   return d.toISOString().slice(0, 19).replace('T', ' ') + ' UTC';
 }
 
+/** datetime-local siempre en UTC (sin conversión del navegador) */
 function syncDateInput() {
-  // datetime-local necesita local, pero usamos UTC
-  const iso = simDate.toISOString().slice(0, 16);
-  dateInput.value = iso;
+  const y = simDate.getUTCFullYear();
+  const m = String(simDate.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(simDate.getUTCDate()).padStart(2, '0');
+  const h = String(simDate.getUTCHours()).padStart(2, '0');
+  const min = String(simDate.getUTCMinutes()).padStart(2, '0');
+  dateInput.value = `${y}-${m}-${d}T${h}:${min}`;
+}
+
+function readDateInputUTC() {
+  const val = dateInput.value;
+  if (!val) return null;
+  // Interpretar el valor del input como UTC explícito
+  const d = new Date(val.length === 16 ? val + ':00Z' : val + 'Z');
+  return isNaN(d.getTime()) ? null : d;
 }
 
 function updateSpeedLabel() {
   const v = parseFloat(speedSlider.value);
-  // -3 → 0.001x , 0 → 1x , 8 → ~ 36500x (≈ 100 años/s)
+  // 1x = tiempo real; 86400x ≈ 1 día/segundo
   timeScale = Math.pow(10, v);
-  if (timeScale >= 1) {
-    speedValue.textContent = timeScale.toFixed(timeScale >= 100 ? 0 : 1) + 'x';
+  if (timeScale >= 86400) {
+    speedValue.textContent = (timeScale / 86400).toFixed(timeScale >= 864000 ? 0 : 1) + ' d/s';
+  } else if (timeScale >= 3600) {
+    speedValue.textContent = (timeScale / 3600).toFixed(1) + ' h/s';
+  } else if (timeScale >= 60) {
+    speedValue.textContent = (timeScale / 60).toFixed(1) + ' min/s';
+  } else if (timeScale >= 1) {
+    speedValue.textContent = timeScale.toFixed(timeScale >= 10 ? 0 : 1) + 'x';
   } else {
     speedValue.textContent = timeScale.toFixed(3) + 'x';
   }
@@ -1472,9 +1582,11 @@ speedSlider.addEventListener('input', updateSpeedLabel);
 updateSpeedLabel();
 
 document.getElementById('setDateBtn').addEventListener('click', () => {
-  const val = dateInput.value;
-  if (val) {
-    simDate = new Date(val + ':00Z');
+  const d = readDateInputUTC();
+  if (d) {
+    simDate = d;
+    eclipseActive = false;
+    eclipseTarget = null;
     updatePositions(julianDate(simDate));
   }
 });
@@ -1524,6 +1636,16 @@ function parseEphemerisDate(item) {
   return isNaN(d.getTime()) ? null : d;
 }
 
+// Coordenadas aproximadas de localizaciones conocidas (para umbra)
+const ECLIPSE_COORDS = {
+  'avilés': { lat: 43.55, lon: -5.92, elevDeg: 10 },
+  'aviles': { lat: 43.55, lon: -5.92, elevDeg: 10 },
+  'oviedo': { lat: 43.36, lon: -5.85, elevDeg: 10 },
+  'cádiz': { lat: 36.53, lon: -6.29, elevDeg: 70 },
+  'cadiz': { lat: 36.53, lon: -6.29, elevDeg: 70 },
+  'sevilla': { lat: 37.39, lon: -5.99, elevDeg: 25 }
+};
+
 function applyEphemeris(index) {
   const item = ephemerisList[index];
   if (!item) return;
@@ -1532,22 +1654,34 @@ function applyEphemeris(index) {
   simDate = d;
   syncDateInput();
   eclipseActive = !!item.eclipse;
-  updatePositions(julianDate(simDate));
-  paused = true; // congelar en el momento de interés
 
-  // En eclipse solar: seguir la Tierra y acercar la cámara
+  const loc = item.localizacion || item['localización'] || '';
+  const key = loc.toLowerCase()
+    .replace(/á/g, 'a').replace(/é/g, 'e').replace(/í/g, 'i')
+    .replace(/ó/g, 'o').replace(/ú/g, 'u');
+  eclipseTarget = eclipseActive ? (ECLIPSE_COORDS[key] || null) : null;
+  // Si no hay coords, usar España norte por defecto en eclipses 2026
+  if (eclipseActive && !eclipseTarget && item.fecha === '20260812') {
+    eclipseTarget = ECLIPSE_COORDS.aviles;
+  }
+
+  updatePositions(julianDate(simDate));
+  paused = true;
+
   if (eclipseActive && bodies.earth) {
     followId = 'earth';
     followSelect.value = 'earth';
     const wp = new THREE.Vector3();
     bodies.earth.mesh.getWorldPosition(wp);
     controls.target.copy(wp);
-    const viewDist = bodies.earth.radius * 8;
-    camera.position.copy(wp).add(new THREE.Vector3(viewDist * 0.6, viewDist * 0.35, viewDist * 0.7));
+    const viewDist = bodies.earth.radius * 9;
+    // Vista desde el lado del Sol para ver umbra y terminador
+    const toSun = wp.clone().normalize().negate();
+    camera.position.copy(wp).add(toSun.multiplyScalar(viewDist * 0.85))
+      .add(new THREE.Vector3(0, viewDist * 0.35, 0));
     controls.update();
   }
 
-  const loc = item.localizacion || item['localización'] || '';
   const link = item.link || '';
   const localH = item.hora || '';
   const utcH = item.horaUTC || '';
@@ -1557,6 +1691,7 @@ function applyEphemeris(index) {
     `<strong>${item.tipo || 'Evento'}</strong><br>` +
     (localH ? `${formatFechaLabel(item.fecha, localH)} ${tz || 'local'}<br>` : '') +
     (utcH ? `${formatFechaLabel(item.fecha, utcH)} UTC<br>` : '') +
+    `Simulación: ${formatDate(simDate)}<br>` +
     (loc ? `📍 ${loc}<br>` : '') +
     (item.nota ? `<em>${item.nota}</em><br>` : '') +
     (link ? `<a href="${link}" target="_blank" rel="noopener">Más información</a>` : '');
@@ -1701,7 +1836,8 @@ function animate(now) {
   lastTime = now;
 
   if (!paused) {
-    simDate = new Date(simDate.getTime() + dt * timeScale * 86400000);
+    // 1x = tiempo real (dt segundos → dt * timeScale segundos de simulación)
+    simDate = new Date(simDate.getTime() + dt * timeScale * 1000);
   }
 
   // Animar shaders (Sol, gas, nubes, anillos, nebulosas…)

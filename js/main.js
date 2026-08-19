@@ -241,12 +241,15 @@ controls.maxDistance = 120;
 controls.target.set(0, 0, 0);
 
 // Luces
-const ambient = new THREE.AmbientLight(0x222233, 0.4);
+const ambient = new THREE.AmbientLight(0x334455, 0.55);
 scene.add(ambient);
 
-const sunLight = new THREE.PointLight(0xffffff, 2.5, 0, 0);
+const sunLight = new THREE.PointLight(0xffffff, 4.5, 0, 0);
 sunLight.position.set(0, 0, 0);
 scene.add(sunLight);
+const sunLight2 = new THREE.PointLight(0xfff0dd, 1.2, 0, 0);
+sunLight2.position.set(0, 0, 0);
+scene.add(sunLight2);
 
 // ─────────────────────────────────────────────────────────────
 // Campo estelar con paralaje (varias capas a distinta profundidad)
@@ -1154,6 +1157,18 @@ function createPlanet(id, data) {
   document.getElementById('followSelect').appendChild(opt);
 }
 
+/** Radio orbital visual: las distancias reales quedan dentro del planeta exagerado */
+function visualMoonOrbit(parent, moonData) {
+  const parentR = parent.radius;
+  const earthMoonReal = 0.00257; // AU Luna
+  // Luna de la Tierra ~ 4× el radio visual de la Tierra
+  const targetEarthMoon = (bodies.earth ? bodies.earth.radius : parentR) * 4.2;
+  const boost = targetEarthMoon / earthMoonReal;
+  const scaled = moonData.a * boost;
+  // Nunca por debajo de 2.6 × radio del planeta padre
+  return Math.max(scaled, parentR * 2.6);
+}
+
 function createMoon(id, data) {
   const parent = bodies[data.parent];
   if (!parent) return;
@@ -1161,7 +1176,8 @@ function createMoon(id, data) {
   const moonGroup = new THREE.Group();
   parent.group.add(moonGroup);
 
-  const radius = Math.max(data.radiusKm * SIZE_SCALE * 1.8, 0.0025);
+  // Radios de lunas más visibles (mínimo relativo al planeta)
+  const radius = Math.max(data.radiusKm * SIZE_SCALE * 2.2, parent.radius * 0.12, 0.0035);
   const geo = new THREE.SphereGeometry(radius, 32, 32);
   const procMat = getMaterialForType(data.type || 'rocky', data);
   const mesh = new THREE.Mesh(geo, procMat);
@@ -1172,20 +1188,22 @@ function createMoon(id, data) {
   label.position.y = radius * 2.2;
   moonGroup.add(label);
 
-  // Órbita de la luna
+  const orbitR = visualMoonOrbit(parent, data);
+
+  // Órbita de la luna (radio visual)
   const orbitPoints = [];
   for (let i = 0; i <= 128; i++) {
     const ang = (i / 128) * Math.PI * 2;
     orbitPoints.push(new THREE.Vector3(
-      Math.cos(ang) * data.a, 0, Math.sin(ang) * data.a
+      Math.cos(ang) * orbitR, 0, Math.sin(ang) * orbitR
     ));
   }
   const orbitGeo = new THREE.BufferGeometry().setFromPoints(orbitPoints);
-  const orbitMat = new THREE.LineBasicMaterial({ color: 0x556677, transparent: true, opacity: 0.35 });
+  const orbitMat = new THREE.LineBasicMaterial({ color: 0x8899aa, transparent: true, opacity: 0.45 });
   const orbitLine = new THREE.Line(orbitGeo, orbitMat);
   parent.group.add(orbitLine);
 
-  const moonObj = { id, group: moonGroup, mesh, data, label, orbitLine, radius };
+  const moonObj = { id, group: moonGroup, mesh, data, label, orbitLine, radius, visualOrbit: orbitR };
   parent.moons.push(moonObj);
   bodies[id] = moonObj;
   allPickables.push(mesh);
@@ -1304,6 +1322,14 @@ function initBodies() {
   }
 }
 
+/** Texturas bitmap por defecto; procedural solo como respaldo */
+async function initDefaultTextures() {
+  await ensureImageMaterials();
+  applyTextureMode(true);
+  const cb = document.getElementById('useTextures');
+  if (cb) cb.checked = true;
+}
+
 // ─────────────────────────────────────────────────────────────
 // Estado de simulación
 let simDate = new Date();
@@ -1311,6 +1337,22 @@ let timeScale = 1; // días de simulación por segundo real
 let paused = false;
 let followId = 'sun';
 let lastTime = performance.now();
+let eclipseActive = false; // alinear Luna y mostrar umbra
+
+// Umbra proyectada sobre la Tierra (disco semitransparente)
+const eclipseShadow = new THREE.Mesh(
+  new THREE.CircleGeometry(1, 48),
+  new THREE.MeshBasicMaterial({
+    color: 0x000000,
+    transparent: true,
+    opacity: 0.55,
+    depthWrite: false,
+    side: THREE.DoubleSide
+  })
+);
+eclipseShadow.visible = false;
+eclipseShadow.renderOrder = 2;
+scene.add(eclipseShadow);
 
 function updatePositions(jd) {
   const T = centuriesSinceJ2000(jd);
@@ -1330,17 +1372,46 @@ function updatePositions(jd) {
       body.mesh.userData.clouds.rotation.y = rotAngle * 1.15;
     }
 
-    // Lunas
+    // Lunas (radio orbital visual)
     for (const moon of body.moons) {
-      const moonDays = jd - 2451545.0;
-      const moonAngle = (moonDays / moon.data.period) * Math.PI * 2;
-      const mx = Math.cos(moonAngle) * moon.data.a;
-      const mz = Math.sin(moonAngle) * moon.data.a;
-      moon.group.position.set(mx, 0, mz);
-      // Rotación (aprox tidally locked)
-      moon.mesh.rotation.y = moonAngle + Math.PI;
+      const orbitR = moon.visualOrbit || moon.data.a;
+      if (eclipseActive && id === 'earth' && moon.id === 'moon') {
+        // Luna entre el Sol (origen) y la Tierra → alineación de eclipse
+        const toSun = pos.clone().negate().normalize();
+        moon.group.position.copy(toSun.multiplyScalar(orbitR));
+        moon.mesh.rotation.y = Math.atan2(toSun.x, toSun.z) + Math.PI;
+      } else {
+        const moonDays = jd - 2451545.0;
+        const moonAngle = (moonDays / Math.abs(moon.data.period)) * Math.PI * 2 * Math.sign(moon.data.period || 1);
+        moon.group.position.set(
+          Math.cos(moonAngle) * orbitR,
+          0,
+          Math.sin(moonAngle) * orbitR
+        );
+        moon.mesh.rotation.y = moonAngle + Math.PI;
+      }
     }
   }
+
+  // Umbra sobre la Tierra en modo eclipse
+  updateEclipseShadow();
+}
+
+function updateEclipseShadow() {
+  const earth = bodies.earth;
+  const moon = bodies.moon;
+  if (!eclipseActive || !earth || !moon) {
+    eclipseShadow.visible = false;
+    return;
+  }
+  const epos = earth.group.position.clone();
+  const toSun = epos.clone().negate().normalize();
+  // Disco de sombra sobre la cara iluminada (lado Sol), centrado hacia el Sol
+  const r = earth.radius * 0.55; // umbra visual
+  eclipseShadow.scale.set(r, r, 1);
+  eclipseShadow.position.copy(epos).add(toSun.clone().multiplyScalar(earth.radius * 1.02));
+  eclipseShadow.lookAt(epos.clone().add(toSun));
+  eclipseShadow.visible = true;
 }
 
 // Cámara de seguimiento
@@ -1431,7 +1502,22 @@ function formatFechaLabel(fecha, hora) {
 
 function parseEphemerisDate(item) {
   const f = String(item.fecha || '');
-  const h = String(item.hora || '12:00');
+  // Preferir hora UTC explícita; si no, interpretar hora local España
+  let h = String(item.horaUTC || '');
+  if (!h) {
+    h = String(item.hora || '12:00');
+    // Sin horaUTC: asumir peninsular verano (UTC+2) si tz CEST, else UTC+1
+    const tz = (item.tz || 'CEST').toUpperCase();
+    const offset = tz === 'CET' ? 1 : 2;
+    const [hh, mm] = h.split(':').map(Number);
+    let utcH = hh - offset;
+    let dayAdj = 0;
+    if (utcH < 0) { utcH += 24; dayAdj = -1; }
+    h = `${String(utcH).padStart(2, '0')}:${String(mm || 0).padStart(2, '0')}`;
+    if (dayAdj && f.length === 8) {
+      // ajuste de día omitido por simplicidad; horaUTC debería venir en el JSON
+    }
+  }
   if (f.length !== 8) return null;
   const iso = `${f.slice(0, 4)}-${f.slice(4, 6)}-${f.slice(6, 8)}T${h.length === 5 ? h + ':00' : h}Z`;
   const d = new Date(iso);
@@ -1445,17 +1531,35 @@ function applyEphemeris(index) {
   if (!d) return;
   simDate = d;
   syncDateInput();
+  eclipseActive = !!item.eclipse;
   updatePositions(julianDate(simDate));
   paused = true; // congelar en el momento de interés
 
+  // En eclipse solar: seguir la Tierra y acercar la cámara
+  if (eclipseActive && bodies.earth) {
+    followId = 'earth';
+    followSelect.value = 'earth';
+    const wp = new THREE.Vector3();
+    bodies.earth.mesh.getWorldPosition(wp);
+    controls.target.copy(wp);
+    const viewDist = bodies.earth.radius * 8;
+    camera.position.copy(wp).add(new THREE.Vector3(viewDist * 0.6, viewDist * 0.35, viewDist * 0.7));
+    controls.update();
+  }
+
   const loc = item.localizacion || item['localización'] || '';
   const link = item.link || '';
+  const localH = item.hora || '';
+  const utcH = item.horaUTC || '';
+  const tz = item.tz || '';
   ephemerisInfo.hidden = false;
   ephemerisInfo.innerHTML =
     `<strong>${item.tipo || 'Evento'}</strong><br>` +
-    `${formatFechaLabel(item.fecha, item.hora)} UTC` +
-    (loc ? `<br>📍 ${loc}` : '') +
-    (link ? `<br><a href="${link}" target="_blank" rel="noopener">Más información</a>` : '');
+    (localH ? `${formatFechaLabel(item.fecha, localH)} ${tz || 'local'}<br>` : '') +
+    (utcH ? `${formatFechaLabel(item.fecha, utcH)} UTC<br>` : '') +
+    (loc ? `📍 ${loc}<br>` : '') +
+    (item.nota ? `<em>${item.nota}</em><br>` : '') +
+    (link ? `<a href="${link}" target="_blank" rel="noopener">Más información</a>` : '');
 }
 
 async function loadEphemerides() {
@@ -1482,6 +1586,8 @@ ephemerisSelect.addEventListener('change', () => {
   const v = ephemerisSelect.value;
   if (v === '') {
     ephemerisInfo.hidden = true;
+    eclipseActive = false;
+    if (typeof updateEclipseShadow === 'function') updateEclipseShadow();
     return;
   }
   applyEphemeris(parseInt(v, 10));
@@ -1652,3 +1758,5 @@ simDate = new Date();
 syncDateInput();
 updatePositions(julianDate(simDate));
 animate(performance.now());
+// Bitmap por defecto (procedural solo si falla la carga)
+initDefaultTextures().catch((e) => console.warn('Texturas:', e));

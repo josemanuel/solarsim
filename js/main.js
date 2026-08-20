@@ -1424,26 +1424,37 @@ eclipseShadowGroup.visible = false;
 
 // ECLIPSE_SHADOW_VERT desde shaders.js
 // ECLIPSE_SHADOW_FRAG desde shaders.js
-const eclipseShadowMat = new THREE.ShaderMaterial({
-  vertexShader: ECLIPSE_SHADOW_VERT,
-  fragmentShader: ECLIPSE_SHADOW_FRAG,
-  uniforms: {
-    uUmbra: { value: 0.38 },
-    uPenumbra: { value: 0.72 },
-    uIntensity: { value: 1.0 },
-    uUmbraColor: { value: new THREE.Color(0x030208) },
-    uPenumbraColor: { value: new THREE.Color(0x1a1528) }
-  },
+// Umbra (núcleo) + penumbra (anillo) — materiales simples y visibles
+const eclipseUmbraMat = new THREE.MeshBasicMaterial({
+  color: 0x000000,
   transparent: true,
+  opacity: 0.82,
   depthWrite: false,
+  depthTest: true,
   side: THREE.DoubleSide,
-  blending: THREE.NormalBlending
+  polygonOffset: true,
+  polygonOffsetFactor: -4,
+  polygonOffsetUnits: -4
 });
+const eclipsePenumbraMat = new THREE.MeshBasicMaterial({
+  color: 0x0a0818,
+  transparent: true,
+  opacity: 0.45,
+  depthWrite: false,
+  depthTest: true,
+  side: THREE.DoubleSide,
+  polygonOffset: true,
+  polygonOffsetFactor: -2,
+  polygonOffsetUnits: -2
+});
+// Compat: alias para uniforms opcionales
+const eclipseShadowMat = { uniforms: { uUmbra: { value: 0.35 }, uPenumbra: { value: 0.85 }, uIntensity: { value: 1.35 } } };
 
-const eclipseShadowMesh = new THREE.Mesh(
-  new THREE.CircleGeometry(1, 128),
-  eclipseShadowMat
-);
+const eclipsePenumbraMesh = new THREE.Mesh(new THREE.CircleGeometry(1, 64), eclipsePenumbraMat);
+const eclipseShadowMesh = new THREE.Mesh(new THREE.CircleGeometry(1, 64), eclipseUmbraMat);
+eclipsePenumbraMesh.scale.setScalar(1.0);
+eclipseShadowMesh.scale.setScalar(0.42);
+eclipseShadowGroup.add(eclipsePenumbraMesh);
 eclipseShadowGroup.add(eclipseShadowMesh);
 let eclipseShadowParent = null;
 
@@ -1525,21 +1536,9 @@ function updatePositions(jd) {
     const pos = keplerPosition(body.data, T);
     body.group.position.copy(pos);
 
-    // Rotación propia
+    // Rotación propia (siempre según el tiempo; la Tierra gira con el día)
     if (id === 'earth') {
-      if (eclipseActive && eclipseTarget) {
-        // Orientación forzada al punto del eclipse (se aplica en updateEclipseShadow)
-        const toSun = pos.clone().negate().normalize();
-        orientEarthPointToSun(
-          body.mesh,
-          eclipseTarget.lat,
-          eclipseTarget.lon,
-          toSun,
-          eclipseTarget.elevDeg
-        );
-      } else {
-        body.mesh.rotation.y = earthRotationY(jd);
-      }
+      body.mesh.rotation.y = earthRotationY(jd);
     } else {
       const rotDays = jd - 2451545.0;
       const rotAngle = (rotDays / body.data.rotationPeriod) * Math.PI * 2;
@@ -1549,12 +1548,11 @@ function updatePositions(jd) {
     // Nubes: rotación independiente (no bloquear al spin de la Tierra)
 
 
-    // Lunas
+    // Lunas (órbita normal; en eclipse la Luna se alinea en updateEclipseShadow)
     for (const moon of body.moons) {
       const orbitR = moon.visualOrbit || moon.data.a;
       if (eclipseActive && id === 'earth' && moon.id === 'moon') {
-        // Posición de la Luna: se fija en updateEclipseShadow
-        continue;
+        continue; // sízygia en updateEclipseShadow
       }
       const moonDays = jd - 2451545.0;
       const period = Math.abs(moon.data.period) || 1;
@@ -1565,6 +1563,7 @@ function updatePositions(jd) {
         Math.sin(moonAngle) * orbitR
       );
       moon.mesh.rotation.y = moonAngle + Math.PI;
+      moon.mesh.scale.setScalar(1);
     }
   }
 
@@ -1590,26 +1589,15 @@ function updateEclipseShadow() {
   }
 
   ensureEclipseShadowOnEarth(earth.mesh);
-  earth.group.updateMatrixWorld(true);
   earth.mesh.updateMatrixWorld(true);
 
   const epos = new THREE.Vector3();
   earth.group.getWorldPosition(epos);
-  const toSun = epos.clone().negate().normalize(); // Tierra → Sol
+  const toSun = epos.clone().negate().normalize();
   const er = earth.radius;
 
-  // 1) Orientar Tierra: localización del JSON hacia el Sol
-  if (eclipseTarget) {
-    orientEarthPointToSun(
-      earth.mesh,
-      eclipseTarget.lat,
-      eclipseTarget.lon,
-      toSun,
-      eclipseTarget.elevDeg
-    );
-  }
-
-  // 2) Umbra en lat/lon del JSON (Avilés / norte de España)
+  // Umbra pegada al lat/lon del JSON (Avilés, Cádiz…) en el mesh de la Tierra.
+  // Gira CON la Tierra (GMST): de día / atardecer / noche según la hora.
   let localHit;
   if (eclipseTarget) {
     localHit = latLonToMeshLocal(eclipseTarget.lat, eclipseTarget.lon);
@@ -1618,31 +1606,33 @@ function updateEclipseShadow() {
     localHit = toSun.clone().transformDirection(inv).normalize();
   }
 
-  const surfaceLocal = localHit.clone().multiplyScalar(er * 1.015);
+  // Por encima de nubes (~1.022) para que se vea
+  const surfaceLocal = localHit.clone().multiplyScalar(er * 1.03);
   eclipseShadowGroup.position.copy(surfaceLocal);
   eclipseShadowGroup.quaternion.setFromUnitVectors(
     new THREE.Vector3(0, 0, 1),
     localHit.clone().normalize()
   );
+  eclipseShadowGroup.renderOrder = 10;
 
-  const discR = er * 0.26;
-  eclipseShadowMesh.scale.set(discR, discR, 1);
-  eclipseShadowMat.uniforms.uUmbra.value = 0.32;
-  eclipseShadowMat.uniforms.uPenumbra.value = 0.80;
-  eclipseShadowMat.uniforms.uIntensity.value = 1.15;
+  const discR = er * 0.22;
+  if (typeof eclipsePenumbraMesh !== 'undefined') {
+    eclipsePenumbraMesh.scale.set(discR, discR, 1);
+    eclipsePenumbraMesh.visible = true;
+  }
+  eclipseShadowMesh.scale.set(discR * 0.42, discR * 0.42, 1);
   eclipseShadowGroup.visible = true;
   eclipseShadowMesh.visible = true;
 
-  // 3) Luna entre Sol y Tierra
+  // Luna en el eje Sol–Tierra (eclipse solar = luna nueva)
   const orbitR = moon.visualOrbit || moon.data.a;
   moon.group.position.copy(toSun.clone().multiplyScalar(orbitR));
   moon.mesh.rotation.y = Math.atan2(toSun.x, toSun.z) + Math.PI;
-
-  const sunR = 0.09;
-  const distSun = Math.max(epos.length(), 0.5);
-  const moonR_eclipse = (sunR / distSun) * orbitR * 1.02;
-  const scale = moon.radius > 0 ? Math.min(moonR_eclipse / moon.radius, 8) : 1;
-  moon.mesh.scale.setScalar(scale);
+  const sunAng = 0.09 / Math.max(epos.length(), 0.5);
+  const needR = sunAng * orbitR * 1.02;
+  if (moon.radius > 0) {
+    moon.mesh.scale.setScalar(Math.min(needR / moon.radius, 6));
+  }
 }
 
 // Cámara de seguimiento
@@ -1821,21 +1811,21 @@ function applyEphemeris(index) {
   if (eclipseActive && bodies.earth) {
     followId = 'earth';
     followSelect.value = 'earth';
-    // updatePositions ya orientó la Tierra y colocó la umbra
+    bodies.earth.mesh.updateMatrixWorld(true);
     const wp = new THREE.Vector3();
     bodies.earth.mesh.getWorldPosition(wp);
-    const toSun = wp.clone().negate().normalize();
-    // Cámara mirando la cara donde cae la umbra (hacia el Sol / localización)
-    let lookDir = toSun.clone();
+    // Mirar el punto del eclipse (Avilés, etc.) según la rotación real (GMST)
+    let lookDir = wp.clone().negate().normalize(); // hacia el Sol por defecto
     if (eclipseTarget) {
       const local = latLonToMeshLocal(eclipseTarget.lat, eclipseTarget.lon);
       lookDir = local.clone().transformDirection(bodies.earth.mesh.matrixWorld).normalize();
     }
-    const viewDist = bodies.earth.radius * 10;
-    controls.target.copy(wp).add(lookDir.clone().multiplyScalar(bodies.earth.radius * 0.3));
-    camera.position.copy(wp)
-      .add(lookDir.clone().multiplyScalar(viewDist))
-      .add(new THREE.Vector3(0, viewDist * 0.2, 0));
+    const viewDist = bodies.earth.radius * 9;
+    const surface = wp.clone().add(lookDir.clone().multiplyScalar(bodies.earth.radius));
+    controls.target.copy(surface);
+    camera.position.copy(surface)
+      .add(lookDir.clone().multiplyScalar(viewDist * 0.85))
+      .add(new THREE.Vector3(0, viewDist * 0.25, 0));
     controls.update();
   }
 

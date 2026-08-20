@@ -10,8 +10,6 @@ import {
   SOLAR_CORONA_FRAG,
   ECLIPSE_SHADOW_VERT,
   ECLIPSE_SHADOW_FRAG,
-  BAILY_CORONA_VERT,
-  BAILY_CORONA_FRAG,
   CLOUD_TEX_VERT,
   CLOUD_TEX_FRAG
 } from './shaders.js';
@@ -1587,31 +1585,20 @@ function updateEclipseShadow() {
   const moon = bodies.moon;
   if (!eclipseActive || !earth || !moon) {
     eclipseShadowGroup.visible = false;
-    if (bailyGroup) bailyGroup.visible = false;
     if (moon && moon.mesh) moon.mesh.scale.setScalar(1);
-    // Corona del Sol a intensidad normal
-    for (const m of sunCoronaMats) {
-      if (m.uniforms && m.uniforms.uIntensity) {
-        m.uniforms.uIntensity.value = m.userData.baseIntensity != null
-          ? m.userData.baseIntensity
-          : m.uniforms.uIntensity.value;
-      }
-    }
     return;
   }
 
   ensureEclipseShadowOnEarth(earth.mesh);
   earth.group.updateMatrixWorld(true);
+  earth.mesh.updateMatrixWorld(true);
 
   const epos = new THREE.Vector3();
   earth.group.getWorldPosition(epos);
-  // Dirección Tierra → Sol (la Luna debe quedar en este eje)
-  const toSun = epos.clone().negate().normalize();
+  const toSun = epos.clone().negate().normalize(); // Tierra → Sol
   const er = earth.radius;
 
-  // 1) Orientar la Tierra: el lugar del eclipse mira HACIA el Sol (cara diurna)
-  //    elevDeg controla si está más al cenit o cerca del terminador, pero siempre
-  //    en el hemisferio iluminado (producto escalar normal·toSun > 0).
+  // 1) Orientar Tierra: localización del JSON hacia el Sol
   if (eclipseTarget) {
     orientEarthPointToSun(
       earth.mesh,
@@ -1622,7 +1609,7 @@ function updateEclipseShadow() {
     );
   }
 
-  // 2) Umbra en el punto geográfico, en la CARA ILUMINADA
+  // 2) Umbra en lat/lon del JSON (Avilés / norte de España)
   let localHit;
   if (eclipseTarget) {
     localHit = latLonToMeshLocal(eclipseTarget.lat, eclipseTarget.lon);
@@ -1631,153 +1618,31 @@ function updateEclipseShadow() {
     localHit = toSun.clone().transformDirection(inv).normalize();
   }
 
-  // Comprobar que el punto está en el hemisferio diurno; si no, usar el punto subsolar
-  earth.mesh.updateMatrixWorld(true);
-  const worldNormal = localHit.clone().transformDirection(earth.mesh.matrixWorld).normalize();
-  if (worldNormal.dot(toSun) < 0.05) {
-    // Forzar umbra en la cara al Sol (punto subsolar en espacio local)
-    const inv = new THREE.Matrix4().copy(earth.mesh.matrixWorld).invert();
-    localHit = toSun.clone().transformDirection(inv).normalize();
-  }
-
-  const surfaceLocal = localHit.clone().multiplyScalar(er * 1.012);
+  const surfaceLocal = localHit.clone().multiplyScalar(er * 1.015);
   eclipseShadowGroup.position.copy(surfaceLocal);
   eclipseShadowGroup.quaternion.setFromUnitVectors(
     new THREE.Vector3(0, 0, 1),
     localHit.clone().normalize()
   );
 
-  const discR = er * 0.22;
+  const discR = er * 0.26;
   eclipseShadowMesh.scale.set(discR, discR, 1);
-  eclipseShadowMat.uniforms.uUmbra.value = 0.34;
-  eclipseShadowMat.uniforms.uPenumbra.value = 0.75;
-  eclipseShadowMat.uniforms.uIntensity.value = 1.0;
+  eclipseShadowMat.uniforms.uUmbra.value = 0.32;
+  eclipseShadowMat.uniforms.uPenumbra.value = 0.80;
+  eclipseShadowMat.uniforms.uIntensity.value = 1.15;
   eclipseShadowGroup.visible = true;
+  eclipseShadowMesh.visible = true;
 
-  // 3) Luna en el eje Sol–Tierra (entre ambos)
+  // 3) Luna entre Sol y Tierra
   const orbitR = moon.visualOrbit || moon.data.a;
   moon.group.position.copy(toSun.clone().multiplyScalar(orbitR));
   moon.mesh.rotation.y = Math.atan2(toSun.x, toSun.z) + Math.PI;
 
-  // Tamaño angular ≈ Sol (ocultación), sin exagerar demasiado
   const sunR = 0.09;
   const distSun = Math.max(epos.length(), 0.5);
-  const sunAng = sunR / distSun;
-  const moonR_eclipse = sunAng * orbitR * 1.02;
+  const moonR_eclipse = (sunR / distSun) * orbitR * 1.02;
   const scale = moon.radius > 0 ? Math.min(moonR_eclipse / moon.radius, 8) : 1;
   moon.mesh.scale.setScalar(scale);
-
-  // 4) Perlas de Baily en el limbo lunar (pequeñas); corona en el SOL
-  updateBailyBeads(moon, toSun, scale);
-  // Intensificar corona solar durante la totalidad
-  for (const m of sunCoronaMats) {
-    if (m.uniforms && m.uniforms.uIntensity) {
-      if (m.userData.baseIntensity == null) {
-        m.userData.baseIntensity = m.uniforms.uIntensity.value;
-      }
-      m.uniforms.uIntensity.value = m.userData.baseIntensity * 1.8;
-    }
-  }
-}
-
-// ── Perlas de Baily + anillo de diamante (en el limbo lunar, luz del Sol)
-//    La corona detallada está en el Sol (sunCoronaMats), no en la Luna.
-let bailyGroup = null;
-let bailyBeads = [];
-let bailyDiamond = null;
-let bailyParent = null;
-
-function ensureBailyOnMoon(moonMesh) {
-  if (bailyParent === moonMesh && bailyGroup) return;
-  if (bailyGroup && bailyParent) bailyParent.remove(bailyGroup);
-
-  bailyGroup = new THREE.Group();
-  bailyBeads = [];
-
-  const beadGeo = new THREE.SphereGeometry(1, 10, 10);
-  const beadCount = 14;
-  for (let i = 0; i < beadCount; i++) {
-    const mat = new THREE.MeshBasicMaterial({
-      color: new THREE.Color().setHSL(0.11 + Math.random() * 0.05, 0.95, 0.88),
-      transparent: true,
-      opacity: 0.85,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending
-    });
-    const bead = new THREE.Mesh(beadGeo, mat);
-    bead.userData.angle = (i / beadCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.2;
-    bead.userData.jitter = 0.98 + Math.random() * 0.04;
-    bead.userData.phase = Math.random() * Math.PI * 2;
-    bailyGroup.add(bead);
-    bailyBeads.push(bead);
-  }
-
-  const diamondMat = new THREE.MeshBasicMaterial({
-    color: 0xfffff0,
-    transparent: true,
-    opacity: 1,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending
-  });
-  bailyDiamond = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 12), diamondMat);
-  bailyDiamond.userData.angle = 0.4;
-  bailyGroup.add(bailyDiamond);
-
-  moonMesh.add(bailyGroup);
-  bailyParent = moonMesh;
-}
-
-/**
- * Perlas en el limbo de la Luna (cara al Sol).
- * @param scale escala actual del mesh lunar (para tamaño de las perlas)
- */
-function updateBailyBeads(moon, toSunWorld, scale = 1) {
-  if (!eclipseActive || !moon) {
-    if (bailyGroup) bailyGroup.visible = false;
-    return;
-  }
-  ensureBailyOnMoon(moon.mesh);
-  bailyGroup.visible = true;
-
-  // Radio visual actual de la Luna (espacio local del mesh, sin scale del padre)
-  const mr = moon.radius || 0.01;
-  // Las perlas son hijas del mesh, que ya tiene scale → trabajar en unidades del mesh
-  const limbR = mr * 1.02;
-
-  moon.mesh.updateMatrixWorld(true);
-  const inv = new THREE.Matrix4().copy(moon.mesh.matrixWorld).invert();
-  const localSun = toSunWorld.clone().transformDirection(inv).normalize();
-
-  let up = new THREE.Vector3(0, 1, 0);
-  if (Math.abs(localSun.dot(up)) > 0.9) up.set(1, 0, 0);
-  const right = new THREE.Vector3().crossVectors(up, localSun).normalize();
-  const ortho = new THREE.Vector3().crossVectors(localSun, right).normalize();
-
-  const t = shaderTime;
-  // Tamaño de perla relativo al radio lunar en espacio local
-  const beadSize = mr * 0.055;
-
-  for (const bead of bailyBeads) {
-    const ang = bead.userData.angle + t * 0.015;
-    const r = limbR * bead.userData.jitter;
-    bead.position
-      .copy(right).multiplyScalar(Math.cos(ang) * r)
-      .add(ortho.clone().multiplyScalar(Math.sin(ang) * r))
-      .add(localSun.clone().multiplyScalar(mr * 0.02));
-    const flicker = 0.45 + 0.55 * Math.sin(t * 4.0 + bead.userData.phase) *
-      Math.sin(t * 2.1 + bead.userData.phase * 1.4);
-    bead.scale.setScalar(beadSize * (0.4 + flicker * 1.1));
-    bead.material.opacity = 0.3 + flicker * 0.7;
-  }
-
-  const dAng = bailyDiamond.userData.angle + Math.sin(t * 0.35) * 0.1;
-  bailyDiamond.position
-    .copy(right).multiplyScalar(Math.cos(dAng) * limbR)
-    .add(ortho.clone().multiplyScalar(Math.sin(dAng) * limbR))
-    .add(localSun.clone().multiplyScalar(mr * 0.03));
-  const dFlicker = 0.65 + 0.35 * Math.sin(t * 5.5);
-  bailyDiamond.scale.setScalar(beadSize * (1.8 + dFlicker * 1.2));
-  bailyDiamond.material.opacity = 0.7 + dFlicker * 0.3;
 }
 
 // Cámara de seguimiento
@@ -1956,18 +1821,21 @@ function applyEphemeris(index) {
   if (eclipseActive && bodies.earth) {
     followId = 'earth';
     followSelect.value = 'earth';
+    // updatePositions ya orientó la Tierra y colocó la umbra
     const wp = new THREE.Vector3();
     bodies.earth.mesh.getWorldPosition(wp);
-    controls.target.copy(wp);
-    // Vista: Sol – Luna – Tierra alineados (desde un lado del eje)
     const toSun = wp.clone().negate().normalize();
-    const side = new THREE.Vector3().crossVectors(toSun, new THREE.Vector3(0, 1, 0)).normalize();
-    if (side.lengthSq() < 0.1) side.set(1, 0, 0);
-    const viewDist = bodies.earth.radius * 12;
+    // Cámara mirando la cara donde cae la umbra (hacia el Sol / localización)
+    let lookDir = toSun.clone();
+    if (eclipseTarget) {
+      const local = latLonToMeshLocal(eclipseTarget.lat, eclipseTarget.lon);
+      lookDir = local.clone().transformDirection(bodies.earth.mesh.matrixWorld).normalize();
+    }
+    const viewDist = bodies.earth.radius * 10;
+    controls.target.copy(wp).add(lookDir.clone().multiplyScalar(bodies.earth.radius * 0.3));
     camera.position.copy(wp)
-      .add(toSun.clone().multiplyScalar(viewDist * 0.4))
-      .add(side.multiplyScalar(viewDist * 0.9))
-      .add(new THREE.Vector3(0, viewDist * 0.35, 0));
+      .add(lookDir.clone().multiplyScalar(viewDist))
+      .add(new THREE.Vector3(0, viewDist * 0.2, 0));
     controls.update();
   }
 

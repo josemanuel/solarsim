@@ -1415,6 +1415,7 @@ let paused = false;
 let followId = 'sun';
 let lastTime = performance.now();
 let eclipseActive = false;
+let eclipseYawOffset = 0; // desfase para que en t0 la umbra caiga en el lugar del JSON
 // Objetivo de umbra (lat, lon) cuando hay eclipse localizado; null = eje Sol-Tierra
 let eclipseTarget = null; // { lat, lon, elevDeg }
 
@@ -1536,9 +1537,9 @@ function updatePositions(jd) {
     const pos = keplerPosition(body.data, T);
     body.group.position.copy(pos);
 
-    // Rotación propia (siempre según el tiempo; la Tierra gira con el día)
+    // Rotación propia (GMST + offset de eclipse si aplica)
     if (id === 'earth') {
-      body.mesh.rotation.y = earthRotationY(jd);
+      body.mesh.rotation.y = earthRotationY(jd) + (eclipseActive ? eclipseYawOffset : 0);
     } else {
       const rotDays = jd - 2451545.0;
       const rotAngle = (rotDays / body.data.rotationPeriod) * Math.PI * 2;
@@ -1589,29 +1590,24 @@ function updateEclipseShadow() {
   }
 
   ensureEclipseShadowOnEarth(earth.mesh);
+  earth.group.updateMatrixWorld(true);
   earth.mesh.updateMatrixWorld(true);
 
   const epos = new THREE.Vector3();
   earth.group.getWorldPosition(epos);
-  const toSun = epos.clone().negate().normalize();
+  const toSun = epos.clone().negate().normalize(); // Tierra → Sol
   const er = earth.radius;
 
-  // Umbra pegada al lat/lon del JSON (Avilés, Cádiz…) en el mesh de la Tierra.
-  // Gira CON la Tierra (GMST): de día / atardecer / noche según la hora.
-  let localHit;
-  if (eclipseTarget) {
-    localHit = latLonToMeshLocal(eclipseTarget.lat, eclipseTarget.lon);
-  } else {
-    const inv = new THREE.Matrix4().copy(earth.mesh.matrixWorld).invert();
-    localHit = toSun.clone().transformDirection(inv).normalize();
-  }
+  // Umbra = intersección del eje Sol–Luna–Tierra con la superficie
+  // (siempre alineada con la Luna; se desplaza sobre el mapa al rotar la Tierra)
+  const inv = new THREE.Matrix4().copy(earth.mesh.matrixWorld).invert();
+  const localHit = toSun.clone().transformDirection(inv).normalize();
 
-  // Por encima de nubes (~1.022) para que se vea
   const surfaceLocal = localHit.clone().multiplyScalar(er * 1.03);
   eclipseShadowGroup.position.copy(surfaceLocal);
   eclipseShadowGroup.quaternion.setFromUnitVectors(
     new THREE.Vector3(0, 0, 1),
-    localHit.clone().normalize()
+    localHit
   );
   eclipseShadowGroup.renderOrder = 10;
 
@@ -1624,7 +1620,7 @@ function updateEclipseShadow() {
   eclipseShadowGroup.visible = true;
   eclipseShadowMesh.visible = true;
 
-  // Luna en el eje Sol–Tierra (eclipse solar = luna nueva)
+  // Luna en el mismo eje (sízygia)
   const orbitR = moon.visualOrbit || moon.data.a;
   moon.group.position.copy(toSun.clone().multiplyScalar(orbitR));
   moon.mesh.rotation.y = Math.atan2(toSun.x, toSun.z) + Math.PI;
@@ -1723,11 +1719,13 @@ document.getElementById('setDateBtn').addEventListener('click', () => {
           // seguir en modo eclipse
         } else {
           eclipseActive = false;
+          eclipseYawOffset = 0;
           eclipseTarget = null;
         }
       }
     } else {
       eclipseActive = false;
+      eclipseYawOffset = 0;
       eclipseTarget = null;
     }
     updatePositions(julianDate(simDate));
@@ -1802,8 +1800,34 @@ function applyEphemeris(index) {
   syncDateInput();
   eclipseActive = !!item.eclipse;
 
-  // Solo coordenadas del JSON (sin mapa fijo)
+  // Solo coordenadas del JSON
   eclipseTarget = eclipseActive ? targetFromEphemerisItem(item) : null;
+  eclipseYawOffset = 0;
+
+  // Calcular desfase de rotación para que, EN ESTE INSTANTE, el lugar del JSON
+  // quede bajo el eje Sol–Tierra (umbra sobre Avilés/Cádiz…). Al avanzar el tiempo,
+  // GMST cambia y la umbra se desplaza sobre el mapa, siempre alineada con la Luna.
+  if (eclipseActive && eclipseTarget && bodies.earth) {
+    const jd0 = julianDate(simDate);
+    const pos = keplerPosition(bodies.earth.data, centuriesSinceJ2000(jd0));
+    const toSun = pos.clone().negate().normalize();
+    const baseY = earthRotationY(jd0);
+    // Ángulo que pondría el punto bajo el Sol
+    const local = latLonToMeshLocal(eclipseTarget.lat, eclipseTarget.lon);
+    const lx = local.x, lz = local.z;
+    const sx = toSun.x, sz = toSun.z;
+    if (Math.hypot(lx, lz) > 1e-6 && Math.hypot(sx, sz) > 1e-6) {
+      const aLocal = Math.atan2(lz, lx);
+      const aSun = Math.atan2(sz, sx);
+      let desiredY = aSun - aLocal;
+      // Offset suave hacia el atardecer si elevDeg es baja
+      const elev = eclipseTarget.elevDeg != null ? eclipseTarget.elevDeg : 15;
+      if (elev < 85) {
+        desiredY -= deg2rad(Math.min(90 - elev, 70)) * 0.5;
+      }
+      eclipseYawOffset = desiredY - baseY;
+    }
+  }
 
   updatePositions(julianDate(simDate));
   paused = true;
@@ -1869,6 +1893,7 @@ ephemerisSelect.addEventListener('change', () => {
   if (v === '') {
     ephemerisInfo.hidden = true;
     eclipseActive = false;
+    eclipseYawOffset = 0;
     if (typeof updateEclipseShadow === 'function') updateEclipseShadow();
     return;
   }

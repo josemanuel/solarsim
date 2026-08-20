@@ -1417,6 +1417,7 @@ let lastTime = performance.now();
 let eclipseActive = false;
 let eclipseYawOffset = 0; // desfase de rotación terrestre en t0
 let moonPhaseOffset = 0;  // desfase orbital lunar (rad); en t0 ≈ luna nueva
+let moonOrbitPhi = 0;     // inclinación efectiva de la órbita lunar (rad) para pasar por lat del eclipse
 // Objetivo de umbra (lat, lon) cuando hay eclipse localizado; null = eje Sol-Tierra
 let eclipseTarget = null; // { lat, lon, elevDeg }
 
@@ -1550,22 +1551,24 @@ function updatePositions(jd) {
     // Nubes: rotación independiente (no bloquear al spin de la Tierra)
 
 
-    // Lunas: traslación orbital + rotación síncrona (mismo periodo → cara fija)
+    // Lunas: traslación (27,3 d sidéreos) + rotación síncrona
     for (const moon of body.moons) {
       const orbitR = moon.visualOrbit || moon.data.a;
       const moonDays = jd - 2451545.0;
       const period = Math.abs(moon.data.period) || 1;
       const sign = Math.sign(moon.data.period || 1);
-      // Ángulo orbital: 2π * (días / periodo sidéreo)
       let moonAngle = (moonDays / period) * Math.PI * 2 * sign;
-      // Desfase solo para la Luna terrestre (ajustar fase en efemérides)
       if (moon.id === 'moon') moonAngle += moonPhaseOffset;
+      // Órbita en plano inclinado: phi eleva la Luna a la latitud del eclipse en t0
+      const phi = (moon.id === 'moon') ? moonOrbitPhi : 0;
+      const cphi = Math.cos(phi);
+      const sphi = Math.sin(phi);
       moon.group.position.set(
-        Math.cos(moonAngle) * orbitR,
-        0,
-        Math.sin(moonAngle) * orbitR
+        Math.cos(moonAngle) * cphi * orbitR,
+        sphi * orbitR,
+        Math.sin(moonAngle) * cphi * orbitR
       );
-      // Rotación síncrona (periodación = traslación): siempre la misma cara a la Tierra
+      // Rotación síncrona (misma cara hacia la Tierra)
       moon.mesh.rotation.y = moonAngle + Math.PI;
       moon.mesh.scale.setScalar(1);
     }
@@ -1586,69 +1589,56 @@ function ensureEclipseShadowOnEarth(earthMesh) {
 function updateEclipseShadow() {
   const earth = bodies.earth;
   const moon = bodies.moon;
-  if (!earth || !moon) {
-    eclipseShadowGroup.visible = false;
-    return;
-  }
-
-  // Sin modo eclipse → sin umbra educativa
-  if (!eclipseActive) {
+  if (!earth || !moon || !eclipseActive) {
     eclipseShadowGroup.visible = false;
     return;
   }
 
   ensureEclipseShadowOnEarth(earth.mesh);
-  earth.group.updateMatrixWorld(true);
+  earth.mesh.updateMatrixWorld(true);
   moon.group.updateMatrixWorld(true);
 
   const epos = new THREE.Vector3();
   earth.group.getWorldPosition(epos);
-  const toSun = epos.clone().negate().normalize(); // Tierra → Sol
   const er = earth.radius;
+  const toSun = epos.clone().negate().normalize();
 
-  // Dirección Tierra → Luna (espacio mundo)
   const mpos = new THREE.Vector3();
   moon.mesh.getWorldPosition(mpos);
-  const toMoon = mpos.clone().sub(epos);
-  const moonDist = toMoon.length();
-  if (moonDist < 1e-12) {
-    eclipseShadowGroup.visible = false;
-    return;
-  }
-  toMoon.multiplyScalar(1 / moonDist);
-
-  // Alineación: solo hay eclipse solar si la Luna está aproximadamente
-  // entre el Sol y la Tierra (mismo hemisferio hacia el Sol)
+  const toMoon = mpos.clone().sub(epos).normalize();
   const align = toMoon.dot(toSun);
-  if (align < 0.85) {
-    // Luna fuera de la zona de luna nueva → no umbra
+
+  // Umbra SIEMPRE en lat/lon del JSON (Avilés = norte de España)
+  if (!eclipseTarget) {
+    eclipseShadowGroup.visible = false;
+    return;
+  }
+  const localHit = latLonToMeshLocal(eclipseTarget.lat, eclipseTarget.lon);
+
+  // Si la Luna está muy lejos de luna nueva, ocultar
+  if (align < 0.5) {
     eclipseShadowGroup.visible = false;
     return;
   }
 
-  // Umbra en la intersección del eje Tierra→Luna con la superficie
-  // (alineada con la Luna; se mueve al orbitar y al rotar la Tierra)
-  const inv = new THREE.Matrix4().copy(earth.mesh.matrixWorld).invert();
-  const localHit = toMoon.clone().transformDirection(inv).normalize();
+  // Radio realista educativo: umbra ~150–250 km → ~0.03–0.04 R
+  // (antes 0.18 R ≈ 2000 km y parecía “en medio del Atlántico”)
+  const umbraR = er * 0.035;
+  const penumbraR = er * 0.08;
 
-  const surfaceLocal = localHit.clone().multiplyScalar(er * 1.03);
+  const surfaceLocal = localHit.clone().multiplyScalar(er * 1.028);
   eclipseShadowGroup.position.copy(surfaceLocal);
-  eclipseShadowGroup.quaternion.setFromUnitVectors(
-    new THREE.Vector3(0, 0, 1),
-    localHit
-  );
+  eclipseShadowGroup.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), localHit);
   eclipseShadowGroup.renderOrder = 10;
 
-  // Intensidad según alineación (1 = perfecta)
-  const intensity = Math.min(1, (align - 0.85) / 0.15);
-  const discR = er * 0.22 * (0.7 + 0.3 * intensity);
+  const intensity = Math.min(1, Math.max(0.4, (align - 0.5) / 0.5));
   if (typeof eclipsePenumbraMesh !== 'undefined') {
-    eclipsePenumbraMesh.scale.set(discR, discR, 1);
-    eclipsePenumbraMesh.material.opacity = 0.45 * intensity;
+    eclipsePenumbraMesh.scale.set(penumbraR, penumbraR, 1);
+    eclipsePenumbraMesh.material.opacity = 0.4 * intensity;
     eclipsePenumbraMesh.visible = true;
   }
-  eclipseShadowMesh.scale.set(discR * 0.42, discR * 0.42, 1);
-  eclipseShadowMesh.material.opacity = 0.82 * intensity;
+  eclipseShadowMesh.scale.set(umbraR, umbraR, 1);
+  eclipseShadowMesh.material.opacity = 0.9 * intensity;
   eclipseShadowGroup.visible = true;
   eclipseShadowMesh.visible = true;
 }
@@ -1743,6 +1733,7 @@ document.getElementById('setDateBtn').addEventListener('click', () => {
           eclipseActive = false;
           eclipseYawOffset = 0;
     moonPhaseOffset = 0;
+    moonOrbitPhi = 0;
           eclipseTarget = null;
         }
       }
@@ -1750,6 +1741,7 @@ document.getElementById('setDateBtn').addEventListener('click', () => {
       eclipseActive = false;
       eclipseYawOffset = 0;
     moonPhaseOffset = 0;
+    moonOrbitPhi = 0;
       eclipseTarget = null;
     }
     updatePositions(julianDate(simDate));
@@ -1828,35 +1820,59 @@ function applyEphemeris(index) {
   eclipseTarget = eclipseActive ? targetFromEphemerisItem(item) : null;
   eclipseYawOffset = 0;
   moonPhaseOffset = 0;
+    moonOrbitPhi = 0;
+  moonOrbitPhi = 0;
 
   if (eclipseActive && bodies.earth && bodies.moon) {
     const jd0 = julianDate(simDate);
     const T0 = centuriesSinceJ2000(jd0);
     const pos = keplerPosition(bodies.earth.data, T0);
     const toSun = pos.clone().negate().normalize();
-
-    // 1) Fase lunar: en t0 la Luna debe estar entre Sol y Tierra (luna nueva)
-    //    posición orbital (cos θ, 0, sin θ) ∥ toSun en el plano XZ del group
     const moonDays = jd0 - 2451545.0;
     const period = Math.abs(bodies.moon.data.period) || 27.321661;
     const baseAngle = (moonDays / period) * Math.PI * 2;
-    const desiredAngle = Math.atan2(toSun.z, toSun.x); // cosθ≈toSun.x, sinθ≈toSun.z
-    moonPhaseOffset = desiredAngle - baseAngle;
 
-    // 2) Rotación terrestre: en t0 el lugar del JSON bajo el eje de sombra
     if (eclipseTarget) {
+      // A) Rotación terrestre: el lugar del JSON queda de cara al Sol (atardecer si elev baja)
       const baseY = earthRotationY(jd0);
       const local = latLonToMeshLocal(eclipseTarget.lat, eclipseTarget.lon);
       const lx = local.x, lz = local.z;
       const sx = toSun.x, sz = toSun.z;
       if (Math.hypot(lx, lz) > 1e-6 && Math.hypot(sx, sz) > 1e-6) {
         let desiredY = Math.atan2(sz, sx) - Math.atan2(lz, lx);
+        // Offset moderado al atardecer (no desplazar España al océano)
         const elev = eclipseTarget.elevDeg != null ? eclipseTarget.elevDeg : 15;
-        if (elev < 85) {
-          desiredY -= deg2rad(Math.min(90 - elev, 70)) * 0.5;
+        if (elev < 40) {
+          desiredY -= deg2rad(Math.min(90 - elev, 50)) * 0.25;
         }
         eclipseYawOffset = desiredY - baseY;
       }
+
+      // B) Aplicar rotación provisional para leer la dirección 3D de Avilés/Cádiz
+      bodies.earth.mesh.rotation.y = baseY + eclipseYawOffset;
+      if (bodies.earth.axialGroup) {
+        // tilt ya está en axialGroup
+      }
+      bodies.earth.mesh.updateMatrixWorld(true);
+      bodies.earth.group.updateMatrixWorld(true);
+
+      const epos = new THREE.Vector3();
+      bodies.earth.group.getWorldPosition(epos);
+      const localN = latLonToMeshLocal(eclipseTarget.lat, eclipseTarget.lon);
+      const worldPt = localN.clone().multiplyScalar(bodies.earth.radius);
+      bodies.earth.mesh.localToWorld(worldPt);
+      const dir = worldPt.sub(epos).normalize(); // dirección Tierra → punto del eclipse
+
+      // C) Órbita lunar inclinada: en t0 la Luna está sobre ese punto (misma lat/lon aparente)
+      //    y por tanto entre ese punto y el Sol si el punto mira al Sol
+      moonOrbitPhi = Math.asin(THREE.MathUtils.clamp(dir.y, -1, 1));
+      const desiredAngle = Math.atan2(dir.z, dir.x);
+      moonPhaseOffset = desiredAngle - baseAngle;
+    } else {
+      // Sin coords: luna nueva en el ecuador solar
+      const desiredAngle = Math.atan2(toSun.z, toSun.x);
+      moonPhaseOffset = desiredAngle - baseAngle;
+      moonOrbitPhi = 0;
     }
   }
 
@@ -1869,18 +1885,18 @@ function applyEphemeris(index) {
     bodies.earth.mesh.updateMatrixWorld(true);
     const wp = new THREE.Vector3();
     bodies.earth.mesh.getWorldPosition(wp);
-    // Mirar el punto del eclipse (Avilés, etc.) según la rotación real (GMST)
-    let lookDir = wp.clone().negate().normalize(); // hacia el Sol por defecto
+    let lookDir = wp.clone().negate().normalize();
     if (eclipseTarget) {
       const local = latLonToMeshLocal(eclipseTarget.lat, eclipseTarget.lon);
       lookDir = local.clone().transformDirection(bodies.earth.mesh.matrixWorld).normalize();
     }
-    const viewDist = bodies.earth.radius * 9;
-    const surface = wp.clone().add(lookDir.clone().multiplyScalar(bodies.earth.radius));
+    const viewDist = bodies.earth.radius * 8;
+    const surface = wp.clone().add(lookDir.clone().multiplyScalar(bodies.earth.radius * 1.02));
     controls.target.copy(surface);
+    // Vista exterior mirando de frente al lugar del eclipse (Europa / España)
     camera.position.copy(surface)
-      .add(lookDir.clone().multiplyScalar(viewDist * 0.85))
-      .add(new THREE.Vector3(0, viewDist * 0.25, 0));
+      .add(lookDir.clone().multiplyScalar(viewDist))
+      .add(new THREE.Vector3(0, viewDist * 0.15, 0));
     controls.update();
   }
 
@@ -1926,6 +1942,7 @@ ephemerisSelect.addEventListener('change', () => {
     eclipseActive = false;
     eclipseYawOffset = 0;
     moonPhaseOffset = 0;
+    moonOrbitPhi = 0;
     if (typeof updateEclipseShadow === 'function') updateEclipseShadow();
     return;
   }

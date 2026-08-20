@@ -253,6 +253,18 @@ controls.dampingFactor = 0.08;
 controls.minDistance = 0.001;
 controls.maxDistance = 120;
 controls.target.set(0, 0, 0);
+// Ratón: izquierdo = rotar, derecho = traslar (pan), rueda = zoom
+controls.mouseButtons = {
+  LEFT: THREE.MOUSE.ROTATE,
+  MIDDLE: THREE.MOUSE.DOLLY,
+  RIGHT: THREE.MOUSE.PAN
+};
+// Táctil: 1 dedo = rotar, 2 dedos = pan+zoom
+controls.touches = {
+  ONE: THREE.TOUCH.ROTATE,
+  TWO: THREE.TOUCH.DOLLY_PAN
+};
+controls.screenSpacePanning = true;
 
 // Luces
 const ambient = new THREE.AmbientLight(0x334455, 0.55);
@@ -1579,6 +1591,8 @@ function updateEclipseShadow() {
   if (!eclipseActive || !earth || !moon) {
     eclipseShadowGroup.visible = false;
     if (bailyGroup) bailyGroup.visible = false;
+    // Restaurar escala normal de la Luna
+    if (moon && moon.mesh) moon.mesh.scale.setScalar(1);
     return;
   }
 
@@ -1632,19 +1646,27 @@ function updateEclipseShadow() {
 
   eclipseShadowGroup.visible = true;
 
-  // 3) Luna en el eje Sol → punto de umbra (espacio del group de la Tierra)
-  const surfaceWorld = surfaceLocal.clone();
-  earth.mesh.localToWorld(surfaceWorld);
-  const worldHit = surfaceWorld.clone().sub(epos).normalize();
+  // 3) CRÍTICO: Luna EXACTAMENTE entre el Sol y la Tierra (sízygia)
+  //    toSun = dirección desde el centro de la Tierra hacia el Sol
+  //    La umbra en la textura puede estar en España; la Luna debe estar
+  //    en el eje Sol–Tierra para que, vista desde la Tierra, oculte al Sol.
   const orbitR = moon.visualOrbit || moon.data.a;
-  const moonWorld = epos.clone().add(worldHit.clone().multiplyScalar(orbitR));
-  const moonLocal = moonWorld.clone();
-  earth.group.worldToLocal(moonLocal);
-  moon.group.position.copy(moonLocal);
-  moon.mesh.rotation.y = Math.atan2(moon.group.position.x, moon.group.position.z) + Math.PI;
+  // earth.group solo tiene traslación → espacio local = dirección mundo
+  moon.group.position.copy(toSun.clone().multiplyScalar(orbitR));
+  moon.mesh.rotation.y = Math.atan2(toSun.x, toSun.z) + Math.PI;
 
-  // 4) Efecto Baily (perlas + anillo de diamante + corona)
-  updateBailyBeads(moon, worldHit);
+  // Proporciones angulares: desde la Tierra, ∠Luna ≈ ∠Sol (ocultación)
+  // Radio del Sol en escena ≈ 0.09, distancia ≈ |epos| (≈ 1 AU)
+  const sunR = 0.09;
+  const distSun = Math.max(epos.length(), 0.5);
+  const sunAng = sunR / distSun;
+  // Radio lunar para que el tamaño angular coincida (total: ligeramente mayor)
+  const moonR_eclipse = sunAng * orbitR * 1.05;
+  const baseScale = moon.radius > 0 ? moonR_eclipse / moon.radius : 1;
+  moon.mesh.scale.setScalar(baseScale);
+
+  // 4) Efecto Baily + corona (eje = dirección al Sol)
+  updateBailyBeads(moon, toSun);
 }
 
 // ── Efecto Baily (perlas de Baily + anillo de diamante + corona) ──
@@ -1920,15 +1942,19 @@ function parseEphemerisDate(item) {
   return isNaN(d.getTime()) ? null : d;
 }
 
-// Coordenadas aproximadas de localizaciones conocidas (para umbra)
-const ECLIPSE_COORDS = {
-  'avilés': { lat: 43.55, lon: -5.92, elevDeg: 10 },
-  'aviles': { lat: 43.55, lon: -5.92, elevDeg: 10 },
-  'oviedo': { lat: 43.36, lon: -5.85, elevDeg: 10 },
-  'cádiz': { lat: 36.53, lon: -6.29, elevDeg: 70 },
-  'cadiz': { lat: 36.53, lon: -6.29, elevDeg: 70 },
-  'sevilla': { lat: 37.39, lon: -5.99, elevDeg: 25 }
-};
+/** Coordenadas desde el JSON de efemérides (lat, lon, elevDeg) */
+function targetFromEphemerisItem(item) {
+  if (!item) return null;
+  const lat = parseFloat(item.lat);
+  const lon = parseFloat(item.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  const elev = parseFloat(item.elevDeg);
+  return {
+    lat,
+    lon,
+    elevDeg: Number.isFinite(elev) ? elev : 15
+  };
+}
 
 function applyEphemeris(index) {
   const item = ephemerisList[index];
@@ -1939,15 +1965,8 @@ function applyEphemeris(index) {
   syncDateInput();
   eclipseActive = !!item.eclipse;
 
-  const loc = item.localizacion || item['localización'] || '';
-  const key = loc.toLowerCase()
-    .replace(/á/g, 'a').replace(/é/g, 'e').replace(/í/g, 'i')
-    .replace(/ó/g, 'o').replace(/ú/g, 'u');
-  eclipseTarget = eclipseActive ? (ECLIPSE_COORDS[key] || null) : null;
-  // Si no hay coords, usar España norte por defecto en eclipses 2026
-  if (eclipseActive && !eclipseTarget && item.fecha === '20260812') {
-    eclipseTarget = ECLIPSE_COORDS.aviles;
-  }
+  // Solo coordenadas del JSON (sin mapa fijo)
+  eclipseTarget = eclipseActive ? targetFromEphemerisItem(item) : null;
 
   updatePositions(julianDate(simDate));
   paused = true;
@@ -1958,10 +1977,14 @@ function applyEphemeris(index) {
     const wp = new THREE.Vector3();
     bodies.earth.mesh.getWorldPosition(wp);
     controls.target.copy(wp);
-    const viewDist = bodies.earth.radius * 9;
-    // Vista desde el lado del Sol para ver umbra y terminador
-    const toSun = wp.clone().normalize().negate();
-    camera.position.copy(wp).add(toSun.multiplyScalar(viewDist * 0.85))
+    // Vista: Sol – Luna – Tierra alineados (desde un lado del eje)
+    const toSun = wp.clone().negate().normalize();
+    const side = new THREE.Vector3().crossVectors(toSun, new THREE.Vector3(0, 1, 0)).normalize();
+    if (side.lengthSq() < 0.1) side.set(1, 0, 0);
+    const viewDist = bodies.earth.radius * 12;
+    camera.position.copy(wp)
+      .add(toSun.clone().multiplyScalar(viewDist * 0.4))
+      .add(side.multiplyScalar(viewDist * 0.9))
       .add(new THREE.Vector3(0, viewDist * 0.35, 0));
     controls.update();
   }
@@ -2092,6 +2115,31 @@ aboutBackdrop.addEventListener('click', closeAbout);
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && aboutModal.classList.contains('open')) closeAbout();
 });
+
+// Panel lateral plegable (pantalla completa)
+const togglePanelBtn = document.getElementById('togglePanelBtn');
+const closePanelBtn = document.getElementById('closePanelBtn');
+function setPanelCollapsed(collapsed) {
+  document.body.classList.toggle('panel-collapsed', collapsed);
+  if (togglePanelBtn) {
+    togglePanelBtn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  }
+}
+if (closePanelBtn) {
+  closePanelBtn.addEventListener('click', () => setPanelCollapsed(true));
+}
+if (togglePanelBtn) {
+  togglePanelBtn.addEventListener('click', () => {
+    setPanelCollapsed(!document.body.classList.contains('panel-collapsed'));
+  });
+}
+// En pantallas estrechas, empezar con el panel plegado para ver el canvas
+if (window.matchMedia('(max-width: 700px)').matches) {
+  setPanelCollapsed(true);
+}
+
+// Evitar menú contextual al usar botón derecho para pan
+renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
 
 // Raycaster para clic
 const raycaster = new THREE.Raycaster();

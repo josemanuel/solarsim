@@ -7,9 +7,13 @@
   <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>
+  <button id="togglePanelBtn" type="button" class="toggle-panel-btn" aria-label="Mostrar u ocultar panel" title="Plegar panel">☰</button>
   <div id="ui">
-    <div class="panel">
-      <h1>Sistema Solar</h1>
+    <div class="panel" id="sidePanel">
+      <div class="panel-header">
+        <h1>Sistema Solar</h1>
+        <button id="closePanelBtn" type="button" class="close-panel-btn" aria-label="Ocultar panel">×</button>
+      </div>
       <div class="control-group">
         <label>Fecha y hora</label>
         <input type="datetime-local" id="dateInput" step="1" />

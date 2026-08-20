@@ -6,8 +6,11 @@
     "horaUTC": "18:28",
     "tz": "CEST",
     "localizacion": "Avilés",
-    "link": "https://eclipses.ign.es/",
+    "lat": 43.55,
+    "lon": -5.92,
+    "elevDeg": 10,
     "eclipse": true,
+    "link": "https://eclipses.ign.es/",
     "nota": "Totalidad ~20:28 hora peninsular (CEST = UTC+2). Sol bajo al atardecer."
   },
   {
@@ -17,9 +20,12 @@
     "horaUTC": "08:47",
     "tz": "CEST",
     "localizacion": "Cádiz",
-    "link": "https://eclipses.ign.es/",
+    "lat": 36.53,
+    "lon": -6.29,
+    "elevDeg": 37,
     "eclipse": true,
-    "nota": "Hora peninsular aproximada (CEST = UTC+2)."
+    "link": "https://eclipses.ign.es/",
+    "nota": "Máximo ~10:47 CEST. Totalidad ~2 min 54 s. Sol a ~37°."
   },
   {
     "tipo": "Eclipse anular",
@@ -28,8 +34,11 @@
     "horaUTC": "16:55",
     "tz": "CET",
     "localizacion": "Sevilla",
-    "link": "https://eclipses.ign.es/",
+    "lat": 37.39,
+    "lon": -5.99,
+    "elevDeg": 15,
     "eclipse": true,
+    "link": "https://eclipses.ign.es/",
     "nota": "Hora peninsular aproximada (CET = UTC+1 en enero)."
   }
 ]

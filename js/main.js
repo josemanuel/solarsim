@@ -1510,13 +1510,10 @@ function orientEarthPointToSun(earthMesh, lat, lon, toSun, elevDeg) {
   const aSun = Math.atan2(sz, sx);
   earthMesh.rotation.y = aSun - aLocal;
 
-  // Elevación: desplazar el yaw para acercar el punto al terminador
-  // cuando el Sol está bajo (eclipse al atardecer en Asturias ≈ 10°)
-  const elev = elevDeg != null ? elevDeg : 10;
-  if (elev < 80) {
-    // Offset en longitud ≈ (90° − elev) hacia el oeste del mediodía
-    // para simular Sol bajo en el horizonte oeste
-    const termOffset = deg2rad(90 - elev) * 0.85;
+  // Elevación: offset moderado hacia el atardecer, sin pasar a la noche
+  const elev = elevDeg != null ? elevDeg : 15;
+  if (elev < 85) {
+    const termOffset = deg2rad(Math.min(90 - elev, 70)) * 0.5;
     earthMesh.rotation.y -= termOffset;
   }
 }
@@ -1591,8 +1588,15 @@ function updateEclipseShadow() {
   if (!eclipseActive || !earth || !moon) {
     eclipseShadowGroup.visible = false;
     if (bailyGroup) bailyGroup.visible = false;
-    // Restaurar escala normal de la Luna
     if (moon && moon.mesh) moon.mesh.scale.setScalar(1);
+    // Corona del Sol a intensidad normal
+    for (const m of sunCoronaMats) {
+      if (m.uniforms && m.uniforms.uIntensity) {
+        m.uniforms.uIntensity.value = m.userData.baseIntensity != null
+          ? m.userData.baseIntensity
+          : m.uniforms.uIntensity.value;
+      }
+    }
     return;
   }
 
@@ -1601,10 +1605,13 @@ function updateEclipseShadow() {
 
   const epos = new THREE.Vector3();
   earth.group.getWorldPosition(epos);
+  // Dirección Tierra → Sol (la Luna debe quedar en este eje)
   const toSun = epos.clone().negate().normalize();
   const er = earth.radius;
 
-  // 1) Orientar la Tierra para el punto del eclipse
+  // 1) Orientar la Tierra: el lugar del eclipse mira HACIA el Sol (cara diurna)
+  //    elevDeg controla si está más al cenit o cerca del terminador, pero siempre
+  //    en el hemisferio iluminado (producto escalar normal·toSun > 0).
   if (eclipseTarget) {
     orientEarthPointToSun(
       earth.mesh,
@@ -1613,11 +1620,9 @@ function updateEclipseShadow() {
       toSun,
       eclipseTarget.elevDeg
     );
-    // Nubes mantienen su propio ángulo (animado en el loop)
   }
 
-  // 2) Anclar umbra/penumbra al punto geográfico EN ESPACIO LOCAL del mesh
-  //    Así la sombra queda pegada a Asturias en la textura, sin errores de proyección mundo
+  // 2) Umbra en el punto geográfico, en la CARA ILUMINADA
   let localHit;
   if (eclipseTarget) {
     localHit = latLonToMeshLocal(eclipseTarget.lat, eclipseTarget.lon);
@@ -1626,176 +1631,153 @@ function updateEclipseShadow() {
     localHit = toSun.clone().transformDirection(inv).normalize();
   }
 
-  // Posición sobre la superficie (ligeramente por encima para evitar z-fighting)
-  const surfaceLocal = localHit.clone().multiplyScalar(er * 1.01);
-  eclipseShadowGroup.position.copy(surfaceLocal);
+  // Comprobar que el punto está en el hemisferio diurno; si no, usar el punto subsolar
+  earth.mesh.updateMatrixWorld(true);
+  const worldNormal = localHit.clone().transformDirection(earth.mesh.matrixWorld).normalize();
+  if (worldNormal.dot(toSun) < 0.05) {
+    // Forzar umbra en la cara al Sol (punto subsolar en espacio local)
+    const inv = new THREE.Matrix4().copy(earth.mesh.matrixWorld).invert();
+    localHit = toSun.clone().transformDirection(inv).normalize();
+  }
 
-  // Orientar el disco tangente a la superficie (normal = localHit)
+  const surfaceLocal = localHit.clone().multiplyScalar(er * 1.012);
+  eclipseShadowGroup.position.copy(surfaceLocal);
   eclipseShadowGroup.quaternion.setFromUnitVectors(
     new THREE.Vector3(0, 0, 1),
     localHit.clone().normalize()
   );
 
-  // Radio del disco = penumbra visual (educativa; real ~1% del diámetro)
-  const discR = er * 0.28;
+  const discR = er * 0.22;
   eclipseShadowMesh.scale.set(discR, discR, 1);
-  // Proporción umbra / penumbra dentro del shader (0–1 del radio del disco)
-  eclipseShadowMat.uniforms.uUmbra.value = 0.36;
-  eclipseShadowMat.uniforms.uPenumbra.value = 0.78;
+  eclipseShadowMat.uniforms.uUmbra.value = 0.34;
+  eclipseShadowMat.uniforms.uPenumbra.value = 0.75;
   eclipseShadowMat.uniforms.uIntensity.value = 1.0;
-
   eclipseShadowGroup.visible = true;
 
-  // 3) CRÍTICO: Luna EXACTAMENTE entre el Sol y la Tierra (sízygia)
-  //    toSun = dirección desde el centro de la Tierra hacia el Sol
-  //    La umbra en la textura puede estar en España; la Luna debe estar
-  //    en el eje Sol–Tierra para que, vista desde la Tierra, oculte al Sol.
+  // 3) Luna en el eje Sol–Tierra (entre ambos)
   const orbitR = moon.visualOrbit || moon.data.a;
-  // earth.group solo tiene traslación → espacio local = dirección mundo
   moon.group.position.copy(toSun.clone().multiplyScalar(orbitR));
   moon.mesh.rotation.y = Math.atan2(toSun.x, toSun.z) + Math.PI;
 
-  // Proporciones angulares: desde la Tierra, ∠Luna ≈ ∠Sol (ocultación)
-  // Radio del Sol en escena ≈ 0.09, distancia ≈ |epos| (≈ 1 AU)
+  // Tamaño angular ≈ Sol (ocultación), sin exagerar demasiado
   const sunR = 0.09;
   const distSun = Math.max(epos.length(), 0.5);
   const sunAng = sunR / distSun;
-  // Radio lunar para que el tamaño angular coincida (total: ligeramente mayor)
-  const moonR_eclipse = sunAng * orbitR * 1.05;
-  const baseScale = moon.radius > 0 ? moonR_eclipse / moon.radius : 1;
-  moon.mesh.scale.setScalar(baseScale);
+  const moonR_eclipse = sunAng * orbitR * 1.02;
+  const scale = moon.radius > 0 ? Math.min(moonR_eclipse / moon.radius, 8) : 1;
+  moon.mesh.scale.setScalar(scale);
 
-  // 4) Efecto Baily + corona (eje = dirección al Sol)
-  updateBailyBeads(moon, toSun);
+  // 4) Perlas de Baily en el limbo lunar (pequeñas); corona en el SOL
+  updateBailyBeads(moon, toSun, scale);
+  // Intensificar corona solar durante la totalidad
+  for (const m of sunCoronaMats) {
+    if (m.uniforms && m.uniforms.uIntensity) {
+      if (m.userData.baseIntensity == null) {
+        m.userData.baseIntensity = m.uniforms.uIntensity.value;
+      }
+      m.uniforms.uIntensity.value = m.userData.baseIntensity * 1.8;
+    }
+  }
 }
 
-// ── Efecto Baily (perlas de Baily + anillo de diamante + corona) ──
+// ── Perlas de Baily + anillo de diamante (en el limbo lunar, luz del Sol)
+//    La corona detallada está en el Sol (sunCoronaMats), no en la Luna.
 let bailyGroup = null;
 let bailyBeads = [];
 let bailyDiamond = null;
-let bailyCorona = null;
 let bailyParent = null;
 
-function ensureBailyOnMoon(moonMesh, moonRadius) {
+function ensureBailyOnMoon(moonMesh) {
   if (bailyParent === moonMesh && bailyGroup) return;
   if (bailyGroup && bailyParent) bailyParent.remove(bailyGroup);
 
   bailyGroup = new THREE.Group();
   bailyBeads = [];
 
-  // Corona de totalidad (vista desde la umbra / limbo lunar)
-  const coronaMat = new THREE.ShaderMaterial({
-    transparent: true,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-    blending: THREE.AdditiveBlending,
-    uniforms: {
-      uIntensity: { value: 1.35 },
-      uTime: { value: 0 }
-    },
-    vertexShader: BAILY_CORONA_VERT,
-    fragmentShader: BAILY_CORONA_FRAG
-  });
-  bailyCorona = new THREE.Mesh(new THREE.CircleGeometry(1, 96), coronaMat);
-  bailyCorona.scale.setScalar(moonRadius * 4.2);
-  bailyGroup.add(bailyCorona);
-
-  // Perlas de Baily: puntos irregulares en el limbo
-  const beadGeo = new THREE.SphereGeometry(1, 12, 12);
-  const beadCount = 18;
+  const beadGeo = new THREE.SphereGeometry(1, 10, 10);
+  const beadCount = 14;
   for (let i = 0; i < beadCount; i++) {
     const mat = new THREE.MeshBasicMaterial({
-      color: new THREE.Color().setHSL(0.12 + Math.random() * 0.06, 0.9, 0.85),
+      color: new THREE.Color().setHSL(0.11 + Math.random() * 0.05, 0.95, 0.88),
       transparent: true,
-      opacity: 0.9,
+      opacity: 0.85,
       depthWrite: false,
       blending: THREE.AdditiveBlending
     });
     const bead = new THREE.Mesh(beadGeo, mat);
-    // Ángulos irregulares (valles lunares)
-    const ang = (i / beadCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.25;
-    const jitter = 0.92 + Math.random() * 0.12;
-    bead.userData.angle = ang;
-    bead.userData.jitter = jitter;
+    bead.userData.angle = (i / beadCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.2;
+    bead.userData.jitter = 0.98 + Math.random() * 0.04;
     bead.userData.phase = Math.random() * Math.PI * 2;
-    bead.userData.baseScale = moonRadius * (0.04 + Math.random() * 0.07);
     bailyGroup.add(bead);
     bailyBeads.push(bead);
   }
 
-  // Anillo de diamante: destello único más brillante
   const diamondMat = new THREE.MeshBasicMaterial({
-    color: 0xffffee,
+    color: 0xfffff0,
     transparent: true,
     opacity: 1,
     depthWrite: false,
     blending: THREE.AdditiveBlending
   });
-  bailyDiamond = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 16), diamondMat);
-  bailyDiamond.userData.angle = 0.35; // posición en el limbo
+  bailyDiamond = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 12), diamondMat);
+  bailyDiamond.userData.angle = 0.4;
   bailyGroup.add(bailyDiamond);
 
   moonMesh.add(bailyGroup);
   bailyParent = moonMesh;
 }
 
-function updateBailyBeads(moon, worldHitSunDir) {
+/**
+ * Perlas en el limbo de la Luna (cara al Sol).
+ * @param scale escala actual del mesh lunar (para tamaño de las perlas)
+ */
+function updateBailyBeads(moon, toSunWorld, scale = 1) {
   if (!eclipseActive || !moon) {
     if (bailyGroup) bailyGroup.visible = false;
     return;
   }
-  const mr = moon.radius || 0.01;
-  ensureBailyOnMoon(moon.mesh, mr);
+  ensureBailyOnMoon(moon.mesh);
   bailyGroup.visible = true;
 
-  // Orientar el grupo de Baily hacia el Sol (eje del eclipse)
-  // worldHitSunDir apunta desde Tierra hacia el limbo / Sol
-  const localSun = worldHitSunDir.clone();
-  // Convertir dirección mundo a espacio del mesh de la Luna
+  // Radio visual actual de la Luna (espacio local del mesh, sin scale del padre)
+  const mr = moon.radius || 0.01;
+  // Las perlas son hijas del mesh, que ya tiene scale → trabajar en unidades del mesh
+  const limbR = mr * 1.02;
+
   moon.mesh.updateMatrixWorld(true);
   const inv = new THREE.Matrix4().copy(moon.mesh.matrixWorld).invert();
-  localSun.transformDirection(inv).normalize();
+  const localSun = toSunWorld.clone().transformDirection(inv).normalize();
 
-  // Corona mirando al Sol
-  bailyCorona.position.copy(localSun.clone().multiplyScalar(mr * 0.15));
-  bailyCorona.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), localSun);
-  if (bailyCorona.material.uniforms) {
-    bailyCorona.material.uniforms.uTime.value = shaderTime;
-    bailyCorona.material.uniforms.uIntensity.value = 1.45;
-  }
-
-  // Perlas en el limbo (círculo perpendicular a la dirección al Sol)
-  // Construir base ortonormal
   let up = new THREE.Vector3(0, 1, 0);
-  if (Math.abs(localSun.dot(up)) > 0.9) up = new THREE.Vector3(1, 0, 0);
+  if (Math.abs(localSun.dot(up)) > 0.9) up.set(1, 0, 0);
   const right = new THREE.Vector3().crossVectors(up, localSun).normalize();
   const ortho = new THREE.Vector3().crossVectors(localSun, right).normalize();
 
   const t = shaderTime;
+  // Tamaño de perla relativo al radio lunar en espacio local
+  const beadSize = mr * 0.055;
+
   for (const bead of bailyBeads) {
-    const ang = bead.userData.angle + t * 0.02;
-    const r = mr * bead.userData.jitter;
-    const pos = right.clone().multiplyScalar(Math.cos(ang) * r)
+    const ang = bead.userData.angle + t * 0.015;
+    const r = limbR * bead.userData.jitter;
+    bead.position
+      .copy(right).multiplyScalar(Math.cos(ang) * r)
       .add(ortho.clone().multiplyScalar(Math.sin(ang) * r))
-      .add(localSun.clone().multiplyScalar(mr * 0.05));
-    bead.position.copy(pos);
-    // Parpadeo irregular (valles que se abren/cierran)
-    const flicker = 0.5 + 0.5 * Math.sin(t * 3.5 + bead.userData.phase) *
-      Math.sin(t * 1.7 + bead.userData.phase * 1.3);
-    const s = bead.userData.baseScale * (0.55 + flicker * 0.9);
-    bead.scale.setScalar(s);
-    bead.material.opacity = 0.35 + flicker * 0.65;
+      .add(localSun.clone().multiplyScalar(mr * 0.02));
+    const flicker = 0.45 + 0.55 * Math.sin(t * 4.0 + bead.userData.phase) *
+      Math.sin(t * 2.1 + bead.userData.phase * 1.4);
+    bead.scale.setScalar(beadSize * (0.4 + flicker * 1.1));
+    bead.material.opacity = 0.3 + flicker * 0.7;
   }
 
-  // Anillo de diamante: perla dominante
-  const dAng = bailyDiamond.userData.angle + Math.sin(t * 0.4) * 0.08;
-  const dPos = right.clone().multiplyScalar(Math.cos(dAng) * mr * 1.02)
-    .add(ortho.clone().multiplyScalar(Math.sin(dAng) * mr * 1.02))
-    .add(localSun.clone().multiplyScalar(mr * 0.08));
-  bailyDiamond.position.copy(dPos);
-  const dFlicker = 0.7 + 0.3 * Math.sin(t * 5.0);
-  bailyDiamond.scale.setScalar(mr * (0.14 + dFlicker * 0.08));
-  bailyDiamond.material.opacity = 0.75 + dFlicker * 0.25;
+  const dAng = bailyDiamond.userData.angle + Math.sin(t * 0.35) * 0.1;
+  bailyDiamond.position
+    .copy(right).multiplyScalar(Math.cos(dAng) * limbR)
+    .add(ortho.clone().multiplyScalar(Math.sin(dAng) * limbR))
+    .add(localSun.clone().multiplyScalar(mr * 0.03));
+  const dFlicker = 0.65 + 0.35 * Math.sin(t * 5.5);
+  bailyDiamond.scale.setScalar(beadSize * (1.8 + dFlicker * 1.2));
+  bailyDiamond.material.opacity = 0.7 + dFlicker * 0.3;
 }
 
 // Cámara de seguimiento
